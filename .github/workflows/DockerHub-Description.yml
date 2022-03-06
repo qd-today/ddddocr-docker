@@ -8,6 +8,7 @@ on:
       - .github/workflows/DockerHub-Description.yml
 jobs:
   dockerHubDescription:
+    if: startsWith(github.repository, 'qiandao-today/pycurl-docker')
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
@@ -17,4 +18,5 @@ jobs:
       with:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
+        repository: qiandao-today/ddddocr-docker
         short-description: ${{ github.event.repository.description }}
