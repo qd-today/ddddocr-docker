@@ -13,18 +13,16 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositorie
     apk update && \
     apk add --update --no-cache bash git tzdata nano openssh-client ca-certificates file python3 py3-pip py3-setuptools py3-wheel && \
     ln -s /usr/bin/python3 /usr/bin/python && \
-    [[ $(getconf LONG_BIT) = "32" && -z $(file /bin/busybox | grep -i "arm") ]] && \
-    { bashtmp='setarch i386 /onnxruntime/build.sh' && cxxtmp='-msse -msse2'; } || { \
+    [[ $(getconf LONG_BIT) = "32" ]] && \
+    { bashtmp='' && cxxtmp=''; } || { \
     [[ -z $(file /bin/busybox | grep -i "arm") ]] && \
     { bashtmp='/onnxruntime/build.sh' && cxxtmp=''; } || \
-    { [[ $(getconf LONG_BIT) = "32" ]] && \
-    { bashtmp='' && cxxtmp=''; } || \
-    { bashtmp='setarch arm64 /onnxruntime/build.sh' && cxxtmp='-Wno-psabi'; }; }; } && {\
+    { bashtmp='setarch arm64 /onnxruntime/build.sh' && cxxtmp='-Wno-psabi'; }; } && \
+    echo $bashtmp && echo $cxxtmp && {\
     [[ -n "$bashtmp" ]] && { \
     apk add --update --no-cache py3-numpy-dev py3-opencv py3-pillow && {\
     apk add --update --no-cache --virtual .build_deps cmake make perl autoconf g++ automake linux-headers libtool util-linux libexecinfo-dev openblas-dev python3-dev protobuf-dev flatbuffers-dev date-dev gtest-dev eigen-dev || \
     apk add --update --no-cache --virtual .build_deps cmake make perl autoconf g++ automake linux-headers libtool util-linux libexecinfo-dev openblas-dev python3-dev protobuf-dev date-dev gtest-dev eigen-dev ;} && \
-    echo $bashtmp && echo $cxxtmp && \
     git clone --depth 1 --branch $ONNXRUNTIME_TAG https://github.com/Microsoft/onnxruntime && \
     cd /onnxruntime && \
     git submodule update --init --recursive && \
@@ -49,8 +47,8 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositorie
     pip install --no-cache-dir /onnxruntime/build/Linux/MinSizeRel/dist/onnxruntime*.whl && \
     ln -s $(python -c 'import warnings;warnings.filterwarnings("ignore");\
     from distutils.sysconfig import get_python_lib;print(get_python_lib())')/onnxruntime/capi/libonnxruntime_providers_shared.so /usr/lib && \
-    cd / && rm -rf /onnxruntime;} ;} || { \
+    cd / && rm -rf /onnxruntime;} || { \
     apk add --update --no-cache libprotobuf-lite && \
-    echo "Onnxruntime Builder does not currently support building arm32 wheels";} && \
+    echo "Onnxruntime Builder does not currently support building i386 and arm32 wheels";} ;} && \
     rm -rf /var/cache/apk/* && \
     rm -rf /usr/share/man/* 
