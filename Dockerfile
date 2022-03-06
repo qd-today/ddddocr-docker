@@ -49,6 +49,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositorie
     from distutils.sysconfig import get_python_lib;print(get_python_lib())')/onnxruntime/capi/libonnxruntime_providers_shared.so /usr/lib && \
     cd / && rm -rf /onnxruntime && \
     git clone --branch $DDDDOCR_VERSION https://github.com/sml2h3/ddddocr.git && \
+    cd ddddocr && \
     sed -i '/install_package_data/d' setup.py && \
     sed -i '/install_requires/d' setup.py && \
     python setup.py install && \
