@@ -5,8 +5,9 @@ FROM alpine:edge
 LABEL maintainer "a76yyyy <q981331502@163.com>"
 LABEL org.opencontainers.image.source=https://github.com/qiandao-today/ddddocr-docker
 
-# Envirenment for onnxruntime
+# Envirenment for onnxruntime & dddocr
 ENV ONNXRUNTIME_TAG=master
+ENV DDDDOCR_VERSION=master
 
 # 换源 & Install packages
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories && \
@@ -42,12 +43,17 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositorie
     onnxruntime_PREFER_SYSTEM_LIB=ON \
     eigen_SOURCE_PATH=/usr/include/eigen3 \
     --skip_tests && \
-    apk del .build_deps && \
     apk add --update --no-cache libprotobuf-lite && \
     pip install --no-cache-dir /onnxruntime/build/Linux/MinSizeRel/dist/onnxruntime*.whl && \
     ln -s $(python -c 'import warnings;warnings.filterwarnings("ignore");\
     from distutils.sysconfig import get_python_lib;print(get_python_lib())')/onnxruntime/capi/libonnxruntime_providers_shared.so /usr/lib && \
-    cd / && rm -rf /onnxruntime;} || { \
+    cd / && rm -rf /onnxruntime && \
+    git clone --branch $DDDDOCR_VERSION https://github.com/sml2h3/ddddocr.git && \
+    sed -i '/install_package_data/d' setup.py && \
+    sed -i '/install_requires/d' setup.py && \
+    python setup.py install && \
+    cd / && rm -rf /ddddocr && \
+    apk del .build_deps ;} || { \
     apk add --update --no-cache libprotobuf-lite && \
     echo "Onnxruntime Builder does not currently support building i386 and arm32 wheels";} ;} && \
     rm -rf /var/cache/apk/* && \
