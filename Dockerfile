@@ -6,7 +6,7 @@ LABEL maintainer "a76yyyy <q981331502@163.com>"
 LABEL org.opencontainers.image.source=https://github.com/qiandao-today/ddddocr-docker
 
 # Envirenment for onnxruntime & dddocr
-ENV ONNXRUNTIME_TAG=master
+ENV ONNXRUNTIME_TAG=v1.11.0
 ENV DDDDOCR_VERSION=master
 
 # 换源 & Install packages
