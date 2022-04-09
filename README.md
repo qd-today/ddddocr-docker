@@ -13,8 +13,8 @@ docker pull a76yyyy/ddddocr:latest
 ## **VERSION**
 
 - PYTHON_VERSION == 3.10
-- ONNXRUNTIME_TAG == master
-- DDDDOCR_VERSION == LATEST
+- ONNXRUNTIME_TAG == v1.11.0
+- DDDDOCR_VERSION == LATEST(v1.4.3)
 
 ## **Tips**
 
