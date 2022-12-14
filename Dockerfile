@@ -14,7 +14,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositorie
     echo 'http://mirrors.ustc.edu.cn/alpine/v3.16/main' >> /etc/apk/repositories && \
     echo 'http://mirrors.ustc.edu.cn/alpine/v3.16/community' >> /etc/apk/repositories && \
     apk update && \
-    apk add --update --no-cache bash git tzdata nano openssh-client ca-certificates file python3 py3-pip py3-setuptools py3-wheel && \
+    apk add --update --no-cache bash git tzdata ca-certificates file python3 py3-six && \
     # ln -s /usr/bin/python3 /usr/bin/python && \
     [[ $(getconf LONG_BIT) = "32" ]] && \
     { bashtmp='' && cxxtmp=''; } || { \
@@ -23,9 +23,17 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositorie
     { bashtmp='setarch arm64 /onnxruntime/build.sh' && cxxtmp='-Wno-psabi'; }; } && \
     echo $bashtmp && echo $cxxtmp && {\
     [[ -n "$bashtmp" ]] && { \
-    apk add --update --no-cache py3-numpy-dev py3-opencv py3-pillow && {\
-    apk add --update --no-cache --virtual .build_deps cmake make perl autoconf g++=11.2.1_git20220219-r2 libexecinfo-dev=1.1-r1 automake linux-headers libtool util-linux openblas-dev python3-dev protobuf-dev date-dev gtest-dev eigen-dev py3-pybind11-dev flatbuffers-dev=2.0.0-r1 patch boost-dev nlohmann-json || \
-    apk add --update --no-cache --virtual .build_deps cmake make perl autoconf g++=11.2.1_git20220219-r2 libexecinfo-dev=1.1-r1 automake linux-headers libtool util-linux openblas-dev python3-dev protobuf-dev date-dev gtest-dev eigen-dev py3-pybind11-dev patch boost-dev nlohmann-json ;} && \
+    apk add --update --no-cache py3-opencv py3-pillow && { \
+    apk add --update --no-cache --virtual .build_deps nano openssh-client \
+    cmake make perl autoconf g++=11.2.1_git20220219-r2 libexecinfo-dev=1.1-r1 \
+    automake linux-headers libtool util-linux openblas-dev python3-dev protobuf-dev \
+    date-dev gtest-dev eigen-dev flatbuffers-dev=2.0.0-r1 patch boost-dev nlohmann-json \
+    py3-pybind11-dev py3-pip py3-setuptools py3-wheel py3-numpy-dev || \
+    apk add --update --no-cache --virtual .build_deps nano openssh-client \
+    cmake make perl autoconf g++=11.2.1_git20220219-r2 libexecinfo-dev=1.1-r1 \
+    automake linux-headers libtool util-linux openblas-dev python3-dev protobuf-dev \
+    date-dev gtest-dev eigen-dev patch boost-dev nlohmann-json \
+    py3-pybind11-dev py3-pip py3-setuptools py3-wheel py3-numpy-dev ;} && \
     git clone --depth 1 --branch $ONNXRUNTIME_TAG https://github.com/Microsoft/onnxruntime && \
     cd /onnxruntime && \
     git submodule update --init --recursive && \
