@@ -5,64 +5,101 @@ FROM alpine:edge
 LABEL maintainer "a76yyyy <q981331502@163.com>"
 LABEL org.opencontainers.image.source=https://github.com/qiandao-today/ddddocr-docker
 
-# Envirenment for onnxruntime & dddocr
-ENV ONNXRUNTIME_TAG=v1.13.1
-ENV DDDDOCR_VERSION=master
+ARG TARGETARCH
+# ENV TARGETARCH=${TARGETARCH}
+
+# Envirenment for dddocr
+ARG DDDDOCR_VERSION=master
+# ENV DDDDOCR_VERSION=${DDDDOCR_VERSION}
 
 # 换源 & Install packages
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories && \
-    echo 'http://mirrors.ustc.edu.cn/alpine/v3.16/main' >> /etc/apk/repositories && \
-    echo 'http://mirrors.ustc.edu.cn/alpine/v3.16/community' >> /etc/apk/repositories && \
+    echo 'https://mirrors.ustc.edu.cn/alpine/edge/testing' >> /etc/apk/repositories && \
     apk update && \
     apk add --update --no-cache bash git tzdata ca-certificates file python3 py3-six && \
     # ln -s /usr/bin/python3 /usr/bin/python && \
-    [[ $(getconf LONG_BIT) = "32" ]] && \
-    { bashtmp='' && cxxtmp=''; } || { \
-    [[ -z $(file /bin/busybox | grep -i "arm") ]] && \
-    { bashtmp='/onnxruntime/build.sh' && cxxtmp=''; } || \
-    { bashtmp='setarch arm64 /onnxruntime/build.sh' && cxxtmp='-Wno-psabi'; }; } && \
-    echo $bashtmp && echo $cxxtmp && {\
-    [[ -n "$bashtmp" ]] && { \
-    apk add --update --no-cache py3-opencv py3-pillow && { \
-    apk add --update --no-cache --virtual .build_deps nano openssh-client \
-    cmake make perl autoconf g++=11.2.1_git20220219-r2 libexecinfo-dev=1.1-r1 \
-    automake linux-headers libtool util-linux openblas-dev python3-dev protobuf-dev \
-    date-dev gtest-dev eigen-dev flatbuffers-dev=2.0.0-r1 patch boost-dev nlohmann-json \
-    py3-pybind11-dev py3-pip py3-setuptools py3-wheel py3-numpy-dev || \
-    apk add --update --no-cache --virtual .build_deps nano openssh-client \
-    cmake make perl autoconf g++=11.2.1_git20220219-r2 libexecinfo-dev=1.1-r1 \
-    automake linux-headers libtool util-linux openblas-dev python3-dev protobuf-dev \
-    date-dev gtest-dev eigen-dev patch boost-dev nlohmann-json \
-    py3-pybind11-dev py3-pip py3-setuptools py3-wheel py3-numpy-dev ;} && \
-    git clone --depth 1 --branch $ONNXRUNTIME_TAG https://github.com/Microsoft/onnxruntime && \
-    cd /onnxruntime && \
-    git submodule update --init --recursive && \
-    cd .. && \
-    $bashtmp --config MinSizeRel  \
-    --parallel \
-    --build_wheel \
-    --enable_pybind \
-    --cmake_extra_defines \
-    CMAKE_CXX_FLAGS="-Wno-deprecated-copy -Wno-unused-variable -Wno-unused-parameter $cxxtmp"\
-    onnxruntime_BUILD_UNIT_TESTS=OFF \
-    onnxruntime_BUILD_SHARED_LIB=OFF \
-    onnxruntime_USE_PREINSTALLED_EIGEN=ON \
-    onnxruntime_PREFER_SYSTEM_LIB=ON \
-    eigen_SOURCE_PATH=/usr/include/eigen3 \
-    --skip_tests && \
-    apk add --update --no-cache libprotobuf-lite && \
-    pip install --no-cache-dir /onnxruntime/build/Linux/MinSizeRel/dist/onnxruntime*.whl && \
-    ln -s $(python -c 'import warnings;warnings.filterwarnings("ignore");\
-    from distutils.sysconfig import get_python_lib;print(get_python_lib())')/onnxruntime/capi/libonnxruntime_providers_shared.so /usr/lib && \
-    cd / && rm -rf /onnxruntime && \
-    git clone --branch $DDDDOCR_VERSION https://github.com/sml2h3/ddddocr.git && \
+    [[ "${TARGETARCH}" != "i386" ]] && [[ "${TARGETARCH}" != "s390x" ]] && { \
+    apk add --update --no-cache py3-pillow py3-onnxruntime py3-numpy libtbb \
+    libjpeg libpng tiff libwebp openjpeg openjpeg-tools eigen blas && \
+    apk add --update --no-cache --virtual .build_deps py3-pip py3-setuptools py3-wheel protobuf-dev py3-numpy-dev \
+        clang cmake lld samurai build-base gcc python3-dev musl-dev libffi-dev g++ linux-headers make libva-glx-dev \
+        openblas-dev libjpeg-turbo-dev libpng-dev tiff-dev libwebp-dev openjpeg-dev libtbb-dev eigen-dev blas-dev && \
+    mkdir opencv && cd opencv && \
+    git clone https://ghproxy.com/https://github.com/opencv/opencv.git && \
+    [[ "${TARGETARCH}" == "amd64" ]] && \
+        extra_cmake_flags="-D CPU_BASELINE_DISABLE=SSE3 -D CPU_BASELINE_REQUIRE=SSE2" || extra_cmake_flags="" && \
+    CC=clang CXX=clang++ \
+    cmake -B build -G Ninja \
+        -D CMAKE_BUILD_TYPE=RELEASE \
+        -D CMAKE_INSTALL_PREFIX=/usr \
+        -D CMAKE_INSTALL_LIBDIR=lib \
+        -D CMAKE_SKIP_INSTALL_RPATH=ON \
+        -D ENABLE_BUILD_HARDENING=ON \
+        -D EIGEN_INCLUDE_PATH=/usr/include/eigen3 \
+        -D OPENCV_ENABLE_NONFREE=OFF \
+        -D OPENCV_SKIP_PYTHON_LOADER=ON \
+        -D OPENCV_GENERATE_SETUPVARS=OFF \
+        -D WITH_JPEG=ON \
+        -D WITH_PNG=ON \
+        -D WITH_TIFF=ON \
+        -D WITH_WEBP=ON \
+        -D WITH_JASPER=ON \
+        -D WITH_EIGEN=ON \
+        -D WITH_TBB=ON \
+        -D WITH_LAPACK=ON \
+        -D WITH_PROTOBUF=ON \
+        -D WITH_ADE=OFF \
+        -D WITH_V4L=OFF \
+        -D WITH_GSTREAMER=OFF \
+        -D WITH_GTK=OFF \
+        -D WITH_QT=OFF \
+        -D WITH_CUDA=OFF \
+        -D WITH_VTK=OFF \
+        -D WITH_OPENEXR=OFF \
+        -D WITH_FFMPEG=OFF \
+        -D WITH_OPENCL=OFF \
+        -D WITH_OPENNI=OFF \
+        -D WITH_XINE=OFF \
+        -D WITH_GDAL=OFF \
+        -D WITH_IPP=OFF \
+        -D WITH_opencv_gapi=OFF \
+        -D WITH_IPP=OFF \
+        -D BUILD_OPENCV_PYTHON3=ON \
+        -D BUILD_OPENCV_PYTHON2=OFF \
+        -D BUILD_OPENCV_JAVA=OFF \
+        -D BUILD_TESTS=OFF \
+        -D BUILD_IPP_IW=OFF \
+        -D BUILD_PERF_TESTS=OFF \
+        -D BUILD_EXAMPLES=OFF \
+        -D BUILD_ANDROID_EXAMPLES=OFF \
+        -D BUILD_DOCS=OFF \
+        -D BUILD_ITT=OFF \
+        -D INSTALL_PYTHON_EXAMPLES=OFF \
+        -D INSTALL_C_EXAMPLES=OFF \
+        -D INSTALL_TESTS=OFF \
+        -D PYTHON3_EXECUTABLE=/usr/bin/python3 \
+        -D PYTHON3_INCLUDE_DIR=$(python -c "from sysconfig import get_paths as gp; print(gp()['include'])") \
+        -D PYTHON3_LIBRARY=/usr/lib/libpython3.so \
+        -D PYTHON3_PACKAGES_PATH=$(python -c "from sysconfig import get_paths as gp; print(gp()['purelib'])") \
+        -D PYTHON3_NUMPY_INCLUDE_DIRS=$(python -c "from sysconfig import get_paths as gp; print(gp()['purelib'])")/numpy/core/include/ \
+        -D Protobuf_INCLUDE_DIR=/usr/include/google/protobuf \
+        -D Protobuf_LIBRARY=/usr/lib/libprotobuf.so \
+        -D Protobuf_PROTOC_EXECUTABLE=/usr/bin/protoc \
+        $extra_cmake_flags \
+        ./opencv \
+    && cmake --build build && \
+    cmake --install build && \
+    cd / && rm -rf /opencv && \
+    git clone --branch $DDDDOCR_VERSION https://ghproxy.com/https://github.com/sml2h3/ddddocr.git && \
     cd ddddocr && \
     sed -i '/install_package_data/d' setup.py && \
     sed -i '/install_requires/d' setup.py && \
-    python setup.py install && \
+    sed -i '/python_requires/d' setup.py && \
+    pip install . && \
     cd / && rm -rf /ddddocr && \
-    apk del .build_deps ;} || { \
+    apk del .build_deps; \
+    } || { \
     apk add --update --no-cache libprotobuf-lite && \
-    echo "Onnxruntime Builder does not currently support building i386 and arm32 wheels";} ;} && \
+    echo "Onnxruntime Builder does not currently support building i386 and s390x wheels";} && \
     rm -rf /var/cache/apk/* && \
-    rm -rf /usr/share/man/* 
+    rm -rf /usr/share/man/*
