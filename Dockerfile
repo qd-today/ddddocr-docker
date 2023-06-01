@@ -25,7 +25,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositorie
         clang cmake lld samurai build-base gcc python3-dev musl-dev libffi-dev g++ linux-headers make libva-glx-dev \
         openblas-dev libjpeg-turbo-dev libpng-dev tiff-dev libwebp-dev openjpeg-dev libtbb-dev eigen-dev blas-dev && \
     mkdir opencv && cd opencv && \
-    git clone https://ghproxy.com/https://github.com/opencv/opencv.git && \
+    git clone https://github.com/opencv/opencv.git && \
     [[ "${TARGETARCH}" == "amd64" ]] && \
         extra_cmake_flags="-D CPU_BASELINE_DISABLE=SSE3 -D CPU_BASELINE_REQUIRE=SSE2" || extra_cmake_flags="" && \
     CC=clang CXX=clang++ \
@@ -90,7 +90,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositorie
     && cmake --build build && \
     cmake --install build && \
     cd / && rm -rf /opencv && \
-    git clone --branch $DDDDOCR_VERSION https://ghproxy.com/https://github.com/sml2h3/ddddocr.git && \
+    git clone --branch $DDDDOCR_VERSION https://github.com/sml2h3/ddddocr.git && \
     cd ddddocr && \
     sed -i '/install_package_data/d' setup.py && \
     sed -i '/install_requires/d' setup.py && \
