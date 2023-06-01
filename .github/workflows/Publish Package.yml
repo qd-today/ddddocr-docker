@@ -1,7 +1,7 @@
 name: Publish Latest Package
-on: 
+on:
   push:
-    paths: 
+    paths:
       - 'Dockerfile'
       - '.github/workflows/**'
     branches: [main]
@@ -15,10 +15,10 @@ jobs:
             uses: actions/checkout@master
           - name: Publish Latest Package
             uses: ilteoood/docker_buildx@master
-            if: startsWith(github.repository, 'qiandao-today/ddddocr-docker')
+            if: startsWith(github.repository, 'qd-today/ddddocr-docker')
             with:
               publish: true
-              imageName: ghcr.io/qiandao-today/ddddocr-docker # dockerid/imageName
+              imageName: ghcr.io/qd-today/ddddocr # dockerid/imageName
               platform: linux/386,linux/arm64,linux/amd64,linux/arm/v6,linux/arm/v7 # 你准备构建的镜像平台
               tag: latest
               dockerServer: ghcr.io
