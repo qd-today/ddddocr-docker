@@ -2,7 +2,7 @@
 
 ## **Repository**
 
-**Github :** [https://github.com/qiandao-today/ddddocr-docker](https://github.com/qiandao-today/ddddocr-docker)
+**Github :** [https://github.com/qd-today/ddddocr-docker](https://github.com/qd-today/ddddocr-docker)
 
 **DockerHub :** [https://hub.docker.com/r/a76yyyy/ddddocr](https://hub.docker.com/r/a76yyyy/ddddocr)
 
