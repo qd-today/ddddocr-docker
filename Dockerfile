@@ -27,7 +27,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositorie
     sed -i '/install_package_data/d' setup.py && \
     sed -i '/install_requires/d' setup.py && \
     sed -i '/python_requires/d' setup.py && \
-    pip install --no-cache-dir --compile . && \
+    pip install --no-cache-dir --compile --break-system-packages . && \
     cd / && rm -rf /ddddocr && \
     apk del .build_deps; \
     } || { \
