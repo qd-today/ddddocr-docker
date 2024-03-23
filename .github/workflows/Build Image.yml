@@ -5,43 +5,58 @@ on:
     paths-ignore:
       - '.github/**'
       - '**.md'
-    branches: [main]
     tags: ["*"]
 
 jobs:
   build:
     runs-on: ubuntu-latest
     name: Publish Package job
-    if: startsWith(github.ref, 'refs/tags/')
 
+    
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-    - name: Get version
-      id: get_version
-      if: startsWith(github.ref, 'refs/tags/')
-      run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v2
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
-    - name: Login to GitHub Container Registry
-      uses: docker/login-action@v2
+    -
+      name: Checkout
+      uses: actions/checkout@v4
+    -
+      name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+    -
+      name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    -
+      id: login-ghcr
+      name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
       with:
         registry: ghcr.io
-        username: ${{ secrets.DOCKER_USERNAME }} # dockerServer Username 在setting创建secrets name=DOCKER_USERNAME  value=dockerid
+        username: ${{ github.repository_owner }} # dockerServer Username 在setting创建secrets name=DOCKER_USERNAME  value=dockerid
         password: ${{ secrets.GITHUB_TOKEN }} # dockerServer Token
-    - name: Login to a76yyyy DockerHub
-      uses: docker/login-action@v2
+      continue-on-error: true
+    -
+      id: login-dockerhub
+      name: Login to DockerHub
+      uses: docker/login-action@v3
       with:
         registry: docker.io
         username: ${{ secrets.DOCKER_USERNAME }} # dockerServer Username 在setting创建secrets name=DOCKER_USERNAME  value=dockerid
         password: ${{ secrets.DOCKER_PASSWORD }} # dockerServer Token 在setting创建secrets name=DOCKER_PASSWORD  value=dockerToken
-    - name: Publish Latest Package
-      uses: docker/build-push-action@v2
+      continue-on-error: true
+    -
+      id: meta
+      name: Docker meta
+      uses: docker/metadata-action@v5
+      with:
+        images: |
+          name=ghcr.io/${{ github.repository_owner }}/ddddocr,enable=${{ steps.login-ghcr.outcome == 'success' }}
+          name=docker.io/a76yyyy/ddddocr,enable=${{ steps.login-dockerhub.outcome == 'success' }}
+        tags: |
+          type=ref,event=tag
+    -
+      name: Publish Latest Package
+      uses: docker/build-push-action@v5
       with:
         context: .
         file: ./Dockerfile
         platforms: linux/386,linux/arm64,linux/amd64,linux/arm/v6,linux/arm/v7,linux/ppc64le,linux/s390x # 你准备构建的镜像平台
         push: true
-        tags: ghcr.io/qd-today/ddddocr:latest,docker.io/a76yyyy/ddddocr:latest,docker.io/a76yyyy/ddddocr:${{ steps.get_version.outputs.VERSION }}
+        tags: ${{ steps.meta.outputs.tags }}
