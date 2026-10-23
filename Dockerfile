@@ -26,15 +26,16 @@ if [ "x" != "x${APK_MIRROR}" ]; then
     APK_CMD="apk --repositories-file=/dev/null -X $APK_MIRROR/alpine/v3.24/main -X $APK_MIRROR/alpine/v3.24/community"
 fi
 $APK_CMD update
-$APK_CMD add --update --no-cache bash git tzdata ca-certificates file python3 py3-six
+# 运行时仅保留 python3 及 OCR 栈必需包：bash/file 用不到（busybox sh 即可），git 归入 .build_deps 用完即删
+$APK_CMD add --update --no-cache tzdata ca-certificates python3 py3-six
 # ln -s /usr/bin/python3 /usr/bin/python
 if [ "${TARGETPLATFORM}" = "linux/amd64" ] || [ "${TARGETPLATFORM}" = "linux/arm64" ] || [ "${TARGETPLATFORM}" = "linux/arm/v7" ]; then
     # opencv 走源码编译（下方），不装 apk 版（其 GUI/视频依赖链约 236MB，ddddocr 用不到）
     $APK_CMD add --update --no-cache py3-pillow py3-onnxruntime py3-numpy libprotobuf-lite
     # ddddocr 1.6.1 起为纯 Python 包（pyproject.toml + setuptools 后端），--no-deps 后仅需 pip/setuptools/wheel
-    # opencv 编译需要 cmake/编译器/python 头文件/numpy 头文件及图像编解码开发库
+    # opencv 编译需要 cmake/编译器/python 头文件/numpy 头文件及图像编解码开发库；git 仅构建期克隆源码用
     $APK_CMD add --update --no-cache --virtual .build_deps py3-pip py3-setuptools py3-wheel \
-        cmake build-base linux-headers python3-dev py3-numpy-dev \
+        git cmake build-base linux-headers python3-dev py3-numpy-dev \
         libjpeg-turbo-dev libpng-dev zlib-dev libwebp-dev
     # 自源码编译最小化 OpenCV：仅 core/imgproc/imgcodecs（ddddocr 实际使用范围），
     # 关闭 Qt/OpenGL/FFmpeg 等 GUI 与视频后端，编译后剥离调试符号
@@ -51,6 +52,8 @@ if [ "${TARGETPLATFORM}" = "linux/amd64" ] || [ "${TARGETPLATFORM}" = "linux/arm
         -DBUILD_opencv_python3=ON
     cmake --build /tmp/opencv-build -j"$(nproc)"
     cmake --install /tmp/opencv-build
+    # 删除 ddddocr 用不到的 OpenCV 数据与头文件：haarcascades/lbpcascades 级联 XML 约 9.6MB、头文件约 4.5MB
+    rm -rf /usr/share/opencv4 /usr/include
     find /usr/lib -name 'libopencv_*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true
     find /usr/lib/python3.*/site-packages/cv2 -name '*.so' -exec strip --strip-unneeded {} + 2>/dev/null || true
     rm -rf /tmp/opencv-build "/tmp/opencv-$OPENCV_VERSION" /tmp/opencv.tar.gz
@@ -66,9 +69,12 @@ if [ "${TARGETPLATFORM}" = "linux/amd64" ] || [ "${TARGETPLATFORM}" = "linux/arm
         PIP_INSTALL="pip install --index-url $PIP_MIRROR"
     fi
     $PIP_INSTALL --no-cache-dir --no-deps --compile --break-system-packages .
-    # onnxruntime 的 py3-sympy 依赖仅用于符号形状推断，ddddocr 不使用；删除 sympy/mpmath 缩减镜像约 47MB
-    rm -rf /usr/lib/python3.*/site-packages/sympy /usr/lib/python3.*/site-packages/mpmath
+    # onnxruntime 的 py3-sympy 依赖仅用于符号形状推断，ddddocr 不使用；连同 dist-info 元数据与 isympy.py 一并删除，缩减镜像约 47MB
+    rm -rf /usr/lib/python3.*/site-packages/sympy* /usr/lib/python3.*/site-packages/mpmath* /usr/lib/python3.*/site-packages/isympy.py
+    # 删除 numpy 测试套件与标准库 turtledemo（运行时无用）
+    rm -rf /usr/lib/python3.*/site-packages/numpy/tests /usr/lib/python3.*/turtledemo
     cd / && rm -rf /ddddocr
+    # .build_deps 内含 git/cmake/编译器/头文件等构建期工具，构建结束全部卸载（file/magic.mgc/bash 已不安装）
     $APK_CMD del .build_deps;
 else
     $APK_CMD add --update --no-cache libprotobuf-lite
