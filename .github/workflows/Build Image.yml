@@ -7,7 +7,7 @@ on:
         type: boolean
         default: false
       platforms:
-        description: '要构建的平台列表，逗号分隔不要空格，如 linux/amd64,linux/arm64；留空=全部平台。注意：子集构建配合 push 会以不完整 manifest 覆盖对应 tag，仅供验证时使用'
+        description: '要构建的平台列表，逗号分隔不要空格，如 linux/amd64,linux/arm64；留空=全部平台（含 loong64）。注意：子集构建配合 push 会以不完整 manifest 覆盖对应 tag，仅供验证时使用'
         type: string
         default: ''
   push:
@@ -21,15 +21,43 @@ jobs:
     runs-on: ubuntu-latest
     name: Publish Package job
 
-    
     steps:
     -
       name: Checkout
       uses: actions/checkout@v4
     -
+      name: Check Dockerfile.loong64 in sync
+      # loong64 变体由主 Dockerfile 经 sed 生成（两处替换：基础镜像 + case 平台列表加入 loong64）；
+      # 此处用同款 sed 重新生成并精确比对，防止两边演化漂移
+      run: |
+        sed -e 's@^FROM alpine:3.24$@# loong64 专用：Docker Hub 官方 alpine 镜像无 loong64 变体，改用龙芯社区构建的对应版本\n# （ghcr.io/loong64/alpine，QEMU on GitHub Actions，源码来自 docker-library）\nFROM ghcr.io/loong64/alpine:3.24@' \
+            -e 's@linux/amd64|linux/arm64|linux/arm/v7|linux/ppc64le|linux/riscv64)@linux/amd64|linux/arm64|linux/arm/v7|linux/ppc64le|linux/riscv64|linux/loong64)@' \
+            Dockerfile > /tmp/Dockerfile.loong64
+        if ! diff /tmp/Dockerfile.loong64 Dockerfile.loong64; then
+          echo "::error::Dockerfile.loong64 与 Dockerfile 不同步，请用 workflow 中同款 sed 命令重新生成"
+          exit 1
+        fi
+    -
       name: Read pinned ddddocr ref
       if: startsWith(github.ref, 'refs/tags/')
       run: echo "DDDOCR_REF=$(tr -d ' \n' < ddddocr.version)" >> "$GITHUB_ENV"
+    -
+      name: Compute platform plan
+      id: plan
+      env:
+        PLATFORMS_INPUT: ${{ github.event.inputs.platforms }}
+      run: |
+        INPUT="$PLATFORMS_INPUT"
+        if [ -z "$INPUT" ]; then
+          INPUT="linux/386,linux/arm64,linux/amd64,linux/arm/v6,linux/arm/v7,linux/ppc64le,linux/riscv64,linux/loong64,linux/s390x"
+        fi
+        # loong64 基础镜像来自 ghcr.io/loong64/alpine（Docker Hub 官方无此架构），需独立 Dockerfile 构建
+        MAIN=$(echo "$INPUT" | tr ',' '\n' | grep -v '^linux/loong64$' | paste -sd ',' -)
+        LOONG=$(echo "$INPUT" | tr ',' '\n' | grep '^linux/loong64$' | paste -sd ',' -)
+        echo "main=$MAIN" >> "$GITHUB_OUTPUT"
+        echo "loong=$LOONG" >> "$GITHUB_OUTPUT"
+        echo "主平台构建: ${MAIN:-（无）}"
+        echo "loong64 构建: ${LOONG:-（不构建）}"
     -
       name: Set up QEMU
       uses: docker/setup-qemu-action@v3
@@ -66,18 +94,61 @@ jobs:
           type=ref,event=tag
           type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     -
-      name: Publish Latest Package
+      id: meta-loong
+      name: Docker meta (loong64 suffix)
+      uses: docker/metadata-action@v5
+      with:
+        images: |
+          name=ghcr.io/${{ github.repository_owner }}/ddddocr,enable=${{ steps.login-ghcr.outcome == 'success' }}
+          name=docker.io/a76yyyy/ddddocr,enable=${{ steps.login-dockerhub.outcome == 'success' }}
+        flavor: |
+          suffix=-loong64
+        tags: |
+          type=ref,event=tag
+          type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    -
+      name: Publish Official Platforms
+      if: steps.plan.outputs.main != ''
       uses: docker/build-push-action@v5
       with:
         context: .
         file: ./Dockerfile
         # 平台分组：amd64/arm64/armv7/ppc64le/riscv64 源码编译 opencv；386/armv6/s390x 为降级镜像（无 onnxruntime）
-        # 注：loong64（龙芯）依赖齐全但 Docker Hub 官方 alpine 镜像无此变体，无法构建，见 Dockerfile 注释
         # dispatch 可通过 platforms 输入指定子集（如只构建 linux/riscv64 做快速验证）；tag 发布始终全平台
-        platforms: ${{ github.event.inputs.platforms || 'linux/386,linux/arm64,linux/amd64,linux/arm/v6,linux/arm/v7,linux/ppc64le,linux/riscv64,linux/s390x' }} # 你准备构建的镜像平台
+        platforms: ${{ steps.plan.outputs.main }}
         # 推送策略：tag 推送（发布）始终推送；workflow_dispatch 按 push 输入决定（默认 false = 仅验证构建）
         push: ${{ github.event.inputs.push == 'true' || startsWith(github.ref, 'refs/tags/') }}
         tags: ${{ steps.meta.outputs.tags }}
         # tag 发布 -> 使用 ddddocr.version 中锁定的上游 commit；其余（dispatch/分支）-> 跟随上游 master
         build-args: |
           DDDDOCR_VERSION=${{ env.DDDOCR_REF || 'master' }}
+    -
+      name: Publish loong64 variant
+      # Docker Hub 官方 alpine 无 loong64 变体，loong64 用龙芯社区基础镜像（ghcr.io/loong64/alpine）单独构建
+      if: steps.plan.outputs.loong != ''
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile.loong64
+        platforms: linux/loong64
+        push: ${{ github.event.inputs.push == 'true' || startsWith(github.ref, 'refs/tags/') }}
+        tags: ${{ steps.meta-loong.outputs.tags }}
+        build-args: |
+          DDDDOCR_VERSION=${{ env.DDDOCR_REF || 'master' }}
+    -
+      name: Merge loong64 into multi-arch manifest
+      # 将 loong64 变体合并进主 tag 的多架构 manifest，使 docker pull :latest 在龙芯机器上直接可用
+      if: steps.plan.outputs.loong != '' && (github.event.inputs.push == 'true' || startsWith(github.ref, 'refs/tags/'))
+      run: |
+        set -u
+        FAIL=0
+        while IFS= read -r TAG; do
+          [ -z "$TAG" ] && continue
+          echo "合并 manifest: $TAG <- $TAG + ${TAG}-loong64"
+          # 主 tag 尚不存在时（仅构建 loong64 子集）退化为仅含 loong64 的 manifest
+          if ! docker buildx imagetools create -t "$TAG" "$TAG" "${TAG}-loong64" 2>/dev/null; then
+            echo "::warning::主 manifest $TAG 不存在或合并失败，退化为仅 loong64"
+            docker buildx imagetools create -t "$TAG" "${TAG}-loong64" || FAIL=1
+          fi
+        done <<< "${{ steps.meta.outputs.tags }}"
+        exit $FAIL

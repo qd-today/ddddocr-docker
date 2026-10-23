@@ -87,7 +87,8 @@ case "${TARGETPLATFORM}" in
         ;;
     *)
         # 386/armv6/s390x 缺 py3-onnxruntime，暂无法支持完整 OCR 栈
-        # loong64（龙芯）依赖虽齐全，但 Docker Hub 官方 alpine 镜像无 loong64 变体，无法作为基础镜像，暂不支持
+        # loong64（龙芯）依赖齐全，但 Docker Hub 官方 alpine 镜像无此变体；
+        # CI 中 loong64 由 Dockerfile.loong64（ghcr.io/loong64/alpine 社区基础镜像）单独构建，不会走到本分支
         $APK_CMD add --update --no-cache libprotobuf-lite
         echo "OCR stack (py3-pillow/py3-onnxruntime/opencv) does not currently support ${TARGETPLATFORM}."
         ;;

@@ -3,3 +3,4 @@
 .python-version
 venv
 .lh
+.DS_Store
