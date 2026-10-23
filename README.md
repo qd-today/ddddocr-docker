@@ -19,7 +19,7 @@ docker pull a76yyyy/ddddocr:latest
 
 ## **版本策略**
 
-- `latest` 标签：跟随上游 master，经 workflow_dispatch（勾选 push）或默认分支推送时构建发布
+- `latest` 标签：跟随上游 master，经 workflow_dispatch（勾选 push）或推送版本 tag 时构建发布（默认分支 main 的普通推送不触发构建，仅同步 Docker Hub 描述）
 - 版本号标签（如 `1.6.1`）：与 ddddocr 上游版本对齐，构建时使用 `ddddocr.version` 中锁定的 commit，可复现
 - 发布新版本流程：更新 `ddddocr.version` 为上游目标 commit → 打对应版本 tag → CI 自动构建并推送
 
