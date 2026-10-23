@@ -95,6 +95,11 @@ jobs:
         images: |
           name=ghcr.io/${{ github.repository_owner }}/ddddocr,enable=${{ steps.login-ghcr.outcome == 'success' }}
           name=docker.io/a76yyyy/ddddocr,enable=${{ steps.login-dockerhub.outcome == 'success' }}
+        # 显式关闭 auto latest：默认 latest=auto 会在 tag 事件自动附加 latest，
+        # 与下方 raw latest 规则叠加产生重复 tag（曾导致 Merge 对 latest 双重合并）；
+        # latest 只由 raw 规则显式产出一次
+        flavor: |
+          latest=false
         tags: |
           type=ref,event=tag
           type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
@@ -175,6 +180,9 @@ jobs:
         images: |
           name=ghcr.io/${{ github.repository_owner }}/ddddocr,enable=${{ steps.login-ghcr.outcome == 'success' }}
           name=docker.io/a76yyyy/ddddocr,enable=${{ steps.login-dockerhub.outcome == 'success' }}
+        # 与 build-official 保持一致：显式关闭 auto latest，避免重复 tag
+        flavor: |
+          latest=false
         tags: |
           type=ref,event=tag
           type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
@@ -186,7 +194,10 @@ jobs:
         images: |
           name=ghcr.io/${{ github.repository_owner }}/ddddocr,enable=${{ steps.login-ghcr.outcome == 'success' }}
           name=docker.io/a76yyyy/ddddocr,enable=${{ steps.login-dockerhub.outcome == 'success' }}
+        # latest=false 必须显式关闭：auto latest 对 suffix flavor 会透传一个无后缀 latest，
+        # 导致 loong64 单架构构建直接覆盖主 latest tag（1.6.1 发布事故的根因）
         flavor: |
+          latest=false
           suffix=-loong64
         tags: |
           type=ref,event=tag
@@ -209,17 +220,33 @@ jobs:
       run: |
         set -u
         FAIL=0
+        # sort -u 去重：metadata-action 的 tag 列表理论上不应重复，防御性去重避免对同一 tag 重复合并
         while IFS= read -r TAG; do
           [ -z "$TAG" ] && continue
+          BASE="${TAG%:*}"
+          GOLDEN="$BASE:${{ github.ref_name }}"
           echo "合并 manifest: $TAG <- $TAG + ${TAG}-loong64"
-          if docker buildx imagetools inspect "$TAG" >/dev/null 2>&1; then
-            # 主 manifest 存在：合并 loong64。合并失败必须报错退出——
+          if docker buildx imagetools inspect "$TAG" 2>/dev/null | grep -q 'linux/amd64'; then
+            # 主 manifest 完好（含 amd64）：正常合并。合并失败必须报错退出——
             # 绝不静默退化成"仅 loong64"覆盖主 tag（那会把已发布的 8 平台 manifest 打没）
             docker buildx imagetools create -t "$TAG" "$TAG" "${TAG}-loong64" || FAIL=1
+          elif [ "$GOLDEN" != "$TAG" ] && docker buildx imagetools inspect "$GOLDEN" 2>/dev/null | grep -q 'linux/amd64'; then
+            # 主 manifest 缺失或不含 amd64（损坏，如曾被单架构误覆盖），但黄金源完好：
+            # 从黄金源（版本 tag，其 manifest 由主平台构建产出、未经 loong64 污染）+ loong64 变体重建
+            echo "::warning::主 manifest $TAG 缺失或损坏，从黄金源 $GOLDEN 重建"
+            docker buildx imagetools create -t "$TAG" "$GOLDEN" "${TAG}-loong64" || FAIL=1
           else
-            # 主 manifest 不存在（仅构建 loong64 子集且无历史发布）：退化为仅含 loong64
-            echo "::warning::主 manifest $TAG 不存在，退化为仅 loong64 的 manifest"
+            # 黄金源亦不可用（仅构建 loong64 子集且无历史发布）：退化为仅含 loong64
+            echo "::warning::主 manifest 与黄金源均不可用，$TAG 退化为仅 loong64 的 manifest"
             docker buildx imagetools create -t "$TAG" "${TAG}-loong64" || FAIL=1
           fi
-        done <<< "${{ steps.meta.outputs.tags }}"
+          # 合并后校验：主 tag 必须同时含 amd64 与 loong64，否则合并未生效
+          if docker buildx imagetools inspect "$TAG" 2>/dev/null | grep -q 'linux/amd64' \
+             && docker buildx imagetools inspect "$TAG" 2>/dev/null | grep -q 'linux/loong64'; then
+            echo "校验通过: $TAG 同时包含 amd64 与 loong64"
+          else
+            echo "::error::合并后校验失败: $TAG 未同时包含 amd64 与 loong64"
+            FAIL=1
+          fi
+        done <<< "$(echo "${{ steps.meta.outputs.tags }}" | sort -u)"
         exit $FAIL
