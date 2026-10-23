@@ -26,8 +26,8 @@ if [ "x" != "x${APK_MIRROR}" ]; then
     APK_CMD="apk --repositories-file=/dev/null -X $APK_MIRROR/alpine/v3.24/main -X $APK_MIRROR/alpine/v3.24/community"
 fi
 $APK_CMD update
-# 运行时仅保留 python3 及 OCR 栈必需包：bash/file 用不到（busybox sh 即可），git 归入 .build_deps 用完即删
-$APK_CMD add --update --no-cache tzdata ca-certificates python3 py3-six
+# 运行时保留 bash（兼容上层镜像与用户脚本）；file 及其 magic.mgc 特征库用不到（busybox sh 即可）；git 归入 .build_deps 用完即删
+$APK_CMD add --update --no-cache bash tzdata ca-certificates python3 py3-six
 # ln -s /usr/bin/python3 /usr/bin/python
 if [ "${TARGETPLATFORM}" = "linux/amd64" ] || [ "${TARGETPLATFORM}" = "linux/arm64" ] || [ "${TARGETPLATFORM}" = "linux/arm/v7" ]; then
     # opencv 走源码编译（下方），不装 apk 版（其 GUI/视频依赖链约 236MB，ddddocr 用不到）
@@ -74,7 +74,7 @@ if [ "${TARGETPLATFORM}" = "linux/amd64" ] || [ "${TARGETPLATFORM}" = "linux/arm
     # 删除 numpy 测试套件与标准库 turtledemo（运行时无用）
     rm -rf /usr/lib/python3.*/site-packages/numpy/tests /usr/lib/python3.*/turtledemo
     cd / && rm -rf /ddddocr
-    # .build_deps 内含 git/cmake/编译器/头文件等构建期工具，构建结束全部卸载（file/magic.mgc/bash 已不安装）
+    # .build_deps 内含 git/cmake/编译器/头文件等构建期工具，构建结束全部卸载（file/magic.mgc 未安装，bash 保留）
     $APK_CMD del .build_deps;
 else
     $APK_CMD add --update --no-cache libprotobuf-lite
