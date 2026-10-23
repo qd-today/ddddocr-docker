@@ -1,6 +1,15 @@
 name: Publish Package
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      push:
+        description: '构建完成后推送到 ghcr.io 与 Docker Hub（不勾选则仅验证构建，不发布任何镜像）'
+        type: boolean
+        default: false
+      platforms:
+        description: '要构建的平台列表，逗号分隔不要空格，如 linux/amd64,linux/arm64；留空=全部平台。注意：子集构建配合 push 会以不完整 manifest 覆盖对应 tag，仅供验证时使用'
+        type: string
+        default: ''
   push:
     paths-ignore:
       - '.github/**'
@@ -62,8 +71,12 @@ jobs:
       with:
         context: .
         file: ./Dockerfile
-        platforms: linux/386,linux/arm64,linux/amd64,linux/arm/v6,linux/arm/v7,linux/ppc64le,linux/s390x # 你准备构建的镜像平台
-        push: true
+        # 平台分组：amd64/arm64/armv7/ppc64le/riscv64 源码编译 opencv；386/armv6/s390x 为降级镜像（无 onnxruntime）
+        # 注：loong64（龙芯）依赖齐全但 Docker Hub 官方 alpine 镜像无此变体，无法构建，见 Dockerfile 注释
+        # dispatch 可通过 platforms 输入指定子集（如只构建 linux/riscv64 做快速验证）；tag 发布始终全平台
+        platforms: ${{ github.event.inputs.platforms || 'linux/386,linux/arm64,linux/amd64,linux/arm/v6,linux/arm/v7,linux/ppc64le,linux/riscv64,linux/s390x' }} # 你准备构建的镜像平台
+        # 推送策略：tag 推送（发布）始终推送；workflow_dispatch 按 push 输入决定（默认 false = 仅验证构建）
+        push: ${{ github.event.inputs.push == 'true' || startsWith(github.ref, 'refs/tags/') }}
         tags: ${{ steps.meta.outputs.tags }}
         # tag 发布 -> 使用 ddddocr.version 中锁定的上游 commit；其余（dispatch/分支）-> 跟随上游 master
         build-args: |

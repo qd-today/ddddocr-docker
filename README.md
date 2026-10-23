@@ -19,7 +19,7 @@ docker pull a76yyyy/ddddocr:latest
 
 ## **版本策略**
 
-- `latest` 标签：跟随上游 master 自动构建（workflow_dispatch 触发）
+- `latest` 标签：跟随上游 master，经 workflow_dispatch（勾选 push）或默认分支推送时构建发布
 - 版本号标签（如 `1.6.1`）：与 ddddocr 上游版本对齐，构建时使用 `ddddocr.version` 中锁定的 commit，可复现
 - 发布新版本流程：更新 `ddddocr.version` 为上游目标 commit → 打对应版本 tag → CI 自动构建并推送
 
@@ -27,9 +27,31 @@ docker pull a76yyyy/ddddocr:latest
 
 > Onnxruntime Builder does not currently support building i386 and s390x wheels!
 
+## **平台支持矩阵**
+
+| 平台 | OCR 栈 | OpenCV 来源 | 镜像体积* | 说明 |
+|---|---|---|---|---|
+| linux/amd64 | ✓ 完整 | 源码编译 4.14.0（最小化） | ~465MB | 主平台 |
+| linux/arm64 | ✓ 完整 | 源码编译 4.14.0（最小化） | ~465MB | 主平台 |
+| linux/arm/v7 | ✓ 完整 | 源码编译 4.14.0（最小化） | ~465MB | |
+| linux/ppc64le | ✓ 完整 | 源码编译 4.14.0（最小化） | ~465MB | QEMU 下编译耗时较长 |
+| linux/riscv64 | ✓ 完整 | 源码编译 4.14.0（最小化） | ~465MB | QEMU 下编译耗时较长 |
+| linux/386、linux/arm/v6、linux/s390x | ✗ 降级 | 无 | ~50MB | 缺 py3-onnxruntime，镜像仅含 python3 + libprotobuf-lite |
+| linux/loong64 | ✗ 不支持 | 依赖齐全 | - | Docker Hub 官方 alpine 镜像无 loong64 变体（已用 manifest 核实），无法作为基础镜像 |
+
+\* 体积为未压缩估算，全部 OCR 平台一致（约 465MB）。ppc64le/riscv64 虽有 Alpine 预编译 opencv 可用，但其 Qt6/X11 依赖链使镜像胀至 ~600-770MB，故与其他平台统一走源码编译。
+
 ## **构建说明**
 
 - OpenCV 不采用 apk 的 py3-opencv：其 Qt/OpenGL/FFmpeg 依赖链约 236MB，ddddocr 用不到；且 PyPI 无 musllinux wheel，故改为源码编译
-- 编译产物经 `strip --strip-unneeded` 剥离符号，amd64/arm64 镜像约 460MB
+- 编译产物经 `strip --strip-unneeded` 剥离符号，各 OCR 平台镜像约 465MB
 - 体积优化（约 50MB 死重清理，不影响任何功能）：不安装 file/magic.mgc 特征库、git 归入 .build_deps 用完即卸、删除 OpenCV haarcascades/lbpcascades 级联数据与 `/usr/include` 头文件、清 sympy/mpmath 元数据残留与 numpy 测试套件
 - 本地构建加速：`docker build --build-arg APK_MIRROR=https://mirrors.tuna.tsinghua.edu.cn .`
+
+## **CI 构建验证（无 push 模式）**
+
+- workflow_dispatch 提供两个输入：
+  - `push`（默认 **false**）：仅执行完整构建验证，**不推送任何镜像**，用于发布前验证
+  - `platforms`（默认空 = 全部）：可指定平台子集加速迭代，如 `linux/riscv64,linux/arm64`（逗号分隔、不要空格）。⚠️ 子集构建若同时勾选 push，会以不完整 manifest 覆盖对应 tag，仅供验证时使用
+- 勾选 `push` 或推送版本 tag（如 `1.6.1`）时才真正发布到 ghcr.io 与 Docker Hub，且 tag 发布始终为全平台构建
+- tag 发布使用 `ddddocr.version` 锁定的上游 commit；dispatch 默认跟随上游 master
