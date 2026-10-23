@@ -227,9 +227,15 @@ jobs:
           GOLDEN="$BASE:${{ github.ref_name }}"
           echo "合并 manifest: $TAG <- $TAG + ${TAG}-loong64"
           if docker buildx imagetools inspect "$TAG" 2>/dev/null | grep -q 'linux/amd64'; then
-            # 主 manifest 完好（含 amd64）：正常合并。合并失败必须报错退出——
-            # 绝不静默退化成"仅 loong64"覆盖主 tag（那会把已发布的 8 平台 manifest 打没）
-            docker buildx imagetools create -t "$TAG" "$TAG" "${TAG}-loong64" || FAIL=1
+            if docker buildx imagetools inspect "$TAG" 2>/dev/null | grep -q 'linux/loong64'; then
+              # 已同时含 amd64 与 loong64（此前已合并过）：跳过，保证幂等——
+              # 重复合并会在 manifest 中留下同一平台多条不同 digest 的条目
+              echo "跳过: $TAG 已包含 amd64 + loong64（幂等，不重复合并）"
+            else
+              # 主 manifest 完好（含 amd64）：正常合并。合并失败必须报错退出——
+              # 绝不静默退化成"仅 loong64"覆盖主 tag（那会把已发布的 8 平台 manifest 打没）
+              docker buildx imagetools create -t "$TAG" "$TAG" "${TAG}-loong64" || FAIL=1
+            fi
           elif [ "$GOLDEN" != "$TAG" ] && docker buildx imagetools inspect "$GOLDEN" 2>/dev/null | grep -q 'linux/amd64'; then
             # 主 manifest 缺失或不含 amd64（损坏，如曾被单架构误覆盖），但黄金源完好：
             # 从黄金源（版本 tag，其 manifest 由主平台构建产出、未经 loong64 污染）+ loong64 变体重建
