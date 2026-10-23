@@ -14,6 +14,7 @@ docker pull a76yyyy/ddddocr:latest
 
 - ALPINE_VERSION == v3.24
 - PYTHON_VERSION == 3.14
+- OPENCV_VERSION == 4.14.0（源码编译最小化构建：仅 core/imgproc/imgcodecs + Python 绑定，无 GUI/视频后端）
 - DDDDOCR_VERSION == 1.6.1（上游未打版本 tag，发布时以 `ddddocr.version` 文件锁定 commit SHA）
 
 ## **版本策略**
@@ -25,3 +26,9 @@ docker pull a76yyyy/ddddocr:latest
 ## **Tips**
 
 > Onnxruntime Builder does not currently support building i386 and s390x wheels!
+
+## **构建说明**
+
+- OpenCV 不采用 apk 的 py3-opencv：其 Qt/OpenGL/FFmpeg 依赖链约 236MB，ddddocr 用不到；且 PyPI 无 musllinux wheel，故改为源码编译
+- 编译产物经 `strip --strip-unneeded` 剥离符号，amd64/arm64 镜像约 510MB
+- 本地构建加速：`docker build --build-arg APK_MIRROR=https://mirrors.tuna.tsinghua.edu.cn .`

@@ -13,12 +13,14 @@ ARG GIT_DOMAIN=https://github.com   #e.g., https://gh-proxy.com/https://github.c
 # Envirenment for dddocr
 ARG DDDDOCR_VERSION=master
 # ENV DDDDOCR_VERSION=${DDDDOCR_VERSION}
+# OpenCV 源码版本：自编译最小化构建（core/imgproc/imgcodecs），替代体积臃肿的 apk py3-opencv
+ARG OPENCV_VERSION=4.14.0
 
 # Install packages
 RUN <<EOT
 #!/usr/bin/env sh
 set -eux
-# v3.24 起 py3-onnxruntime / py3-opencv / py3-pillow / py3-numpy 均在 community 仓，无需 testing 源
+# v3.24 起 py3-onnxruntime / py3-pillow / py3-numpy 均在 community 仓，无需 testing 源；opencv 改为源码编译
 APK_CMD="apk"
 if [ "x" != "x${APK_MIRROR}" ]; then
     APK_CMD="apk --repositories-file=/dev/null -X $APK_MIRROR/alpine/v3.24/main -X $APK_MIRROR/alpine/v3.24/community"
@@ -27,9 +29,31 @@ $APK_CMD update
 $APK_CMD add --update --no-cache bash git tzdata ca-certificates file python3 py3-six
 # ln -s /usr/bin/python3 /usr/bin/python
 if [ "${TARGETPLATFORM}" = "linux/amd64" ] || [ "${TARGETPLATFORM}" = "linux/arm64" ] || [ "${TARGETPLATFORM}" = "linux/arm/v7" ]; then
-    $APK_CMD add --update --no-cache py3-pillow py3-onnxruntime py3-opencv py3-numpy libprotobuf-lite
+    # opencv 走源码编译（下方），不装 apk 版（其 GUI/视频依赖链约 236MB，ddddocr 用不到）
+    $APK_CMD add --update --no-cache py3-pillow py3-onnxruntime py3-numpy libprotobuf-lite
     # ddddocr 1.6.1 起为纯 Python 包（pyproject.toml + setuptools 后端），--no-deps 后仅需 pip/setuptools/wheel
-    $APK_CMD add --update --no-cache --virtual .build_deps py3-pip py3-setuptools py3-wheel
+    # opencv 编译需要 cmake/编译器/python 头文件/numpy 头文件及图像编解码开发库
+    $APK_CMD add --update --no-cache --virtual .build_deps py3-pip py3-setuptools py3-wheel \
+        cmake build-base linux-headers python3-dev py3-numpy-dev \
+        libjpeg-turbo-dev libpng-dev zlib-dev libwebp-dev
+    # 自源码编译最小化 OpenCV：仅 core/imgproc/imgcodecs（ddddocr 实际使用范围），
+    # 关闭 Qt/OpenGL/FFmpeg 等 GUI 与视频后端，编译后剥离调试符号
+    wget -q -O /tmp/opencv.tar.gz "https://github.com/opencv/opencv/archive/refs/tags/$OPENCV_VERSION.tar.gz"
+    tar -C /tmp -xzf /tmp/opencv.tar.gz
+    cmake -S "/tmp/opencv-$OPENCV_VERSION" -B /tmp/opencv-build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DBUILD_LIST=core,imgproc,imgcodecs,python3 \
+        -DBUILD_SHARED_LIBS=ON \
+        -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF \
+        -DWITH_QT=OFF -DWITH_GTK=OFF -DWITH_OPENGL=OFF -DWITH_FFMPEG=OFF \
+        -DWITH_IPP=OFF -DWITH_TBB=OFF -DWITH_OPENCL=OFF -DWITH_CUDA=OFF -DWITH_V4L=OFF \
+        -DBUILD_opencv_python3=ON
+    cmake --build /tmp/opencv-build -j"$(nproc)"
+    cmake --install /tmp/opencv-build
+    find /usr/lib -name 'libopencv_*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true
+    find /usr/lib/python3.*/site-packages/cv2 -name '*.so' -exec strip --strip-unneeded {} + 2>/dev/null || true
+    rm -rf /tmp/opencv-build "/tmp/opencv-$OPENCV_VERSION" /tmp/opencv.tar.gz
     # 统一用 init+fetch 拉取：分支名（master）/ tag / commit SHA 均可；上游无版本 tag，发布时按 SHA 锁定
     git init -q /ddddocr
     cd /ddddocr
@@ -48,7 +72,7 @@ if [ "${TARGETPLATFORM}" = "linux/amd64" ] || [ "${TARGETPLATFORM}" = "linux/arm
     $APK_CMD del .build_deps;
 else
     $APK_CMD add --update --no-cache libprotobuf-lite
-    echo "py3-pillow/py3-onnxruntime/py3-opencv does not currently support ${TARGETPLATFORM}."
+    echo "OCR stack (py3-pillow/py3-onnxruntime/opencv) does not currently support ${TARGETPLATFORM}."
 fi
 rm -rf /var/cache/apk/*
 rm -rf /usr/share/man/*
