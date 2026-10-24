@@ -210,8 +210,8 @@ jobs:
   # ---- 冒烟测试：与构建解耦的独立信号源。
   # 每个平台一个 job：用对应构建组的层缓存重建单平台镜像（命中缓存 = 秒级，不重新编译），
   # 再在真实环境里跑该平台镜像。行为验证因此覆盖全部 9 平台，而构建期只留 import 级自洽检查。
-  # 6 个 OCR 平台跑 tests/ocr-selfcheck.py（真实推理链路），3 个空壳平台跑
-  # tests/smoke-degraded.sh（断言「确实没有 OCR」的契约）。
+  # 所有平台共用 tests/smoke.py，用参数区分期望（ocr = 真实推理链路，
+  # degraded = 断言「这里确实没有 OCR 栈」），避免每个平台一份脚本各自漂移。
   smoke:
     needs: [plan, build]
     name: Smoke ${{ matrix.platform }} (${{ matrix.kind }})
@@ -246,13 +246,13 @@ jobs:
           build-args: |
             DDDDOCR_VERSION=${{ needs.plan.outputs.dddocr_ref }}
           cache-from: type=gha,scope=ddddocr-${{ matrix.group }}
-      # 脚本经 stdin 喂给容器（python3 - / sh -s），无需把文件塞进镜像，也用不到 bind mount
-      - name: Run OCR selfcheck
-        if: ${{ matrix.kind == 'ocr' }}
-        run: docker run --rm -i --platform ${{ matrix.platform }} ddddocr-smoke:test python3 - < tests/ocr-selfcheck.py
-      - name: Run degraded-image contract check
-        if: ${{ matrix.kind == 'degraded' }}
-        run: docker run --rm -i --platform ${{ matrix.platform }} ddddocr-smoke:test sh -s < tests/smoke-degraded.sh
+      # 脚本经 stdin 喂给容器（python3 -），无需把文件塞进镜像，也用不到 bind mount。
+      # matrix.kind 显式传入而不是让脚本自动探测能力——自动探测会静默降级，
+      # 把「某个 OCR 平台上的 ddddocr 意外消失」这种回归变成一次通过
+      - name: Run smoke (${{ matrix.kind }})
+        run: |
+          docker run --rm -i --platform ${{ matrix.platform }} ddddocr-smoke:test \
+            python3 - ${{ matrix.kind }} < tests/smoke.py
 
   publish:
     needs: [plan, build, smoke]

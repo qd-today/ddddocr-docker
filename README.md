@@ -103,13 +103,14 @@ plan    计算架构分组（按 dispatch 的 platforms 输入裁剪）
 **测试防线（两层，都在构建之外）**：
 
 - **per-arch 冒烟矩阵（9 个 job，每平台一个）**：用构建阶段的层缓存重建单平台镜像
-  （命中缓存 = 秒级，不重新编译），再在该架构上真跑：
-  - 6 个 OCR 平台执行 `tests/ocr-selfcheck.py`：依赖 import → 模型加载 → 图像编码 →
-    ONNX 前向 → 解码输出。ppc64le/riscv64/loong64 的 OpenCV/onnxruntime 都是 QEMU 下
-    源码编译，架构相关的 ABI/数值问题只有真实前向才会暴露
-  - 3 个空壳平台执行 `tests/smoke-degraded.sh`：断言 python3 可用、libprotobuf-lite 在位，
-    并**确认 `ddddocr`/`cv2` 确实不存在**（与下面「空壳镜像」一节的契约一一对应）
-  - 脚本用 stdin 喂进容器（`python3 -` / `sh -s`），不进镜像、不依赖 bind mount
+  （命中缓存 = 秒级，不重新编译），再在该架构上真跑 `tests/smoke.py`，模式由平台类型显式传入：
+  - 6 个 OCR 平台 `-- ocr`：依赖 import → 模型加载 → 图像编码 → ONNX 前向 → 解码输出。
+    ppc64le/riscv64/loong64 的 OpenCV/onnxruntime 都是 QEMU 下源码编译，架构相关的
+    ABI/数值问题只有真实前向才会暴露
+  - 3 个空壳平台 `-- degraded`：断言 python3 可用、libprotobuf-lite 在位，并**确认
+    `ddddocr`/`cv2`/`onnxruntime` 确实不存在**（与下面「空壳镜像」一节的契约一一对应）
+  - 模式显式传入而不是自动探测：自动探测会在 ddddocr 意外消失时静默降级成空壳检查并通过
+  - 脚本用 stdin 喂进容器（`python3 - <mode>`），不进镜像、不依赖 bind mount、不依赖外部网络
 - **发布后 manifest 断言**：每个正式 tag 的平台集合必须与计划完全一致，不一致直接 fail
   （1.6.1 那次 `latest` 被单架构覆盖的事故，从此由 CI 自动拦截）
 
