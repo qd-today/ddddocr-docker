@@ -77,13 +77,19 @@ case "${TARGETPLATFORM}" in
         cmake --build /tmp/opencv-build -j"$(nproc)"
         cmake --install /tmp/opencv-build
         # 删除 ddddocr 用不到的 OpenCV 数据与头文件：haarcascades/lbpcascades 级联 XML 约 9.6MB、头文件约 4.5MB
-        rm -rf /usr/share/opencv4 /usr/include
+        # 注意：只能删 /usr/include/opencv4，不能整个 rm -rf /usr/include——Alpine 3.24 起 pyconfig.h 由
+        # python3 包拥有（属运行时文件，不在 .build_deps 内），删了整个目录会让下游镜像
+        # （如 pycurl-docker）编译任何 C 扩展时都报 missing Python.h，被迫 apk fix python3 兜底
+        rm -rf /usr/share/opencv4 /usr/include/opencv4
         find /usr/lib -name 'libopencv_*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true
         find /usr/lib/python3.*/site-packages/cv2 -name '*.so' -exec strip --strip-unneeded {} + 2>/dev/null || true
         rm -rf /tmp/opencv-build "/tmp/opencv-$OPENCV_VERSION" /tmp/opencv.tar.gz
         install_ddddocr
         # .build_deps 内含 git/cmake/编译器/头文件等构建期工具，构建结束全部卸载（file/magic.mgc 未安装，bash 保留）
         $APK_CMD del .build_deps
+        # 防御性断言：pyconfig.h 必须存活（3.24 起归 python3 包；它是下游镜像编译 C 扩展的前提，
+        # 曾在 2290fdc 清理步骤中被 rm -rf /usr/include 误删，导致 pycurl-docker 需要 apk fix python3 兜底）
+        ls /usr/include/python3.*/pyconfig.h
         ;;
     *)
         # 386/armv6/s390x 缺 py3-onnxruntime，暂无法支持完整 OCR 栈

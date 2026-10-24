@@ -47,7 +47,7 @@ docker pull a76yyyy/ddddocr:latest
 
 - OpenCV 不采用 apk 的 py3-opencv：其 Qt/OpenGL/FFmpeg 依赖链约 236MB，ddddocr 用不到；且 PyPI 无 musllinux wheel，故改为源码编译
 - 编译产物经 `strip --strip-unneeded` 剥离符号，各 OCR 平台镜像约 465MB
-- 体积优化（约 50MB 死重清理，不影响任何功能）：不安装 file/magic.mgc 特征库、git 归入 .build_deps 用完即卸、删除 OpenCV haarcascades/lbpcascades 级联数据与 `/usr/include` 头文件、清 sympy/mpmath 元数据残留与 numpy 测试套件
+- 体积优化（约 50MB 死重清理，不影响任何功能）：不安装 file/magic.mgc 特征库、git 归入 .build_deps 用完即卸、删除 OpenCV haarcascades/lbpcascades 级联数据与 `/usr/include/opencv4` 头文件（注意保留 `/usr/include` 其余内容——Alpine 3.24 起 `pyconfig.h` 由 python3 包拥有，是下游镜像编译 C 扩展的前提）、清 sympy/mpmath 元数据残留与 numpy 测试套件
 - 本地构建加速：`docker build --build-arg APK_MIRROR=https://mirrors.tuna.tsinghua.edu.cn .`
 
 ## **CI 构建验证（无 push 模式）**
