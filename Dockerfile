@@ -5,6 +5,7 @@ FROM alpine:3.24
 LABEL maintainer "a76yyyy <q981331502@163.com>"
 LABEL org.opencontainers.image.source=https://github.com/qd-today/ddddocr-docker
 ARG TARGETPLATFORM
+ARG TARGETARCH
 
 ARG APK_MIRROR=""  #e.g., https://mirrors.tuna.tsinghua.edu.cn
 ARG PIP_MIRROR=""  #e.g., https://pypi.tuna.tsinghua.edu.cn/simple
@@ -65,15 +66,43 @@ case "${TARGETPLATFORM}" in
             libjpeg-turbo-dev libpng-dev zlib-dev libwebp-dev
         wget -q -O /tmp/opencv.tar.gz "https://github.com/opencv/opencv/archive/refs/tags/$OPENCV_VERSION.tar.gz"
         tar -C /tmp -xzf /tmp/opencv.tar.gz
+        # OpenCV 的目标架构必须显式指定，不能让 cmake 从 uname 推断。
+        # 在 GitHub 原生 arm64 runner 上，armv7 容器由内核 compat 模式直接执行（不经 QEMU），
+        # uname -m 返回 aarch64 -> cmake 打印 "Detected processor: aarch64" -> NEON 测试拿
+        # aarch64 的检查文件喂 arm32 编译器，必然失败 -> 静默退化成纯标量 OpenCV
+        # （实测日志：arm/v7 Baseline 为空，而 arm64 是 "NEON FP16"）。
+        # 构建不报错、冒烟也通过，只是 armv7 上 OCR 明显变慢——这类静默降级比编译失败更危险，
+        # 所以下面既显式传 CMAKE_SYSTEM_PROCESSOR，又在 configure 后断言探测结果与基线。
+        case "${TARGETARCH}" in
+            amd64)   cmake_proc=x86_64 ;;
+            arm64)   cmake_proc=aarch64 ;;
+            arm)     cmake_proc=arm ;;   # armv7 走 ARM32 分支，NEON 才会被启用
+            386)     cmake_proc=i386 ;;
+            ppc64le) cmake_proc=ppc64le ;;
+            riscv64) cmake_proc=riscv64 ;;
+            loong64) cmake_proc=loongarch64 ;;
+            *) echo "未知 TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;;
+        esac
         cmake -S "/tmp/opencv-$OPENCV_VERSION" -B /tmp/opencv-build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_SYSTEM_PROCESSOR="${cmake_proc}" \
             -DBUILD_LIST=core,imgproc,imgcodecs,python3 \
             -DBUILD_SHARED_LIBS=ON \
             -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF \
             -DWITH_QT=OFF -DWITH_GTK=OFF -DWITH_OPENGL=OFF -DWITH_FFMPEG=OFF \
             -DWITH_IPP=OFF -DWITH_TBB=OFF -DWITH_OPENCL=OFF -DWITH_CUDA=OFF -DWITH_V4L=OFF \
-            -DBUILD_opencv_python3=ON
+            -DBUILD_opencv_python3=ON > /tmp/cmake.log 2>&1 || \
+            { echo "ERROR: cmake configure 失败"; tail -80 /tmp/cmake.log; exit 1; }
+        grep -E "Detected processor|CPU/HW features|Baseline" /tmp/cmake.log
+        # 断言一：cmake 实际采用的处理器必须等于预期（防止 -DCMAKE_SYSTEM_PROCESSOR 被忽略）
+        grep -q "Detected processor: ${cmake_proc}" /tmp/cmake.log || \
+            { echo "ERROR: cmake 探测到的主机架构与目标 ${cmake_proc} 不一致"; grep "Detected processor" /tmp/cmake.log; exit 1; }
+        # 断言二：armv7 必须落在 NEON 基线上（这正是被 uname 骗掉的优化）
+        if [ "$TARGETARCH" = "arm" ]; then
+            grep -qE "Baseline:.*NEON" /tmp/cmake.log || \
+                { echo "ERROR: armv7 未启用 NEON 基线，镜像会退化为纯标量"; grep -A2 "CPU/HW features" /tmp/cmake.log; exit 1; }
+        fi
         cmake --build /tmp/opencv-build -j"$(nproc)"
         cmake --install /tmp/opencv-build
         # 删除 ddddocr 用不到的 OpenCV 数据与头文件：haarcascades/lbpcascades 级联 XML 约 9.6MB、头文件约 4.5MB
@@ -93,7 +122,7 @@ case "${TARGETPLATFORM}" in
         #   - pyconfig.h 存活 = 下游镜像能编译 C 扩展
         # 真实推理属于测试，不在构建期跑：那会把测试塞进构建、混淆「构建失败」与
         # 「运行时失败」两种信号，也让产物无法在已知运行时损坏时单独构建出来调试。
-        # 推理验证由 CI 的 per-arch 冒烟矩阵执行（tests/ocr-selfcheck.py，覆盖全部
+        # 推理验证由 CI 的 per-arch 冒烟矩阵执行（tests/smoke.py ocr，覆盖全部
         # 6 个 OCR 平台），本步骤保持微秒级
         python3 -c "import ddddocr, onnxruntime, cv2"
         # 防御性断言：pyconfig.h 必须存活（3.24 起归 python3 包；它是下游镜像编译 C 扩展的前提，
