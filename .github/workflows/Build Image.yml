@@ -79,7 +79,9 @@ jobs:
           PLATFORMS_INPUT: ${{ github.event.inputs.platforms }}
           NATIVE_ARM: ${{ github.event.inputs.native_arm == 'false' && 'false' || 'true' }}
         run: |
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          # 先写临时文件再回显：python 的 stdout 若直接重定向到 $GITHUB_OUTPUT，
+          # 任何人类可读输出都会污染 key=value 格式
+          python3 - <<'PY' > /tmp/plan.out
           import json, os, sys
 
           raw = (os.environ.get("PLATFORMS_INPUT") or "").strip()
@@ -121,7 +123,10 @@ jobs:
           print("full=%s" % str(sorted(plats) == sorted(ALL)).lower())
           PY
           echo "--- 构建分组 ---"
-          echo '${{ steps.plan.outputs.matrix }}' | python3 -m json.tool
+          sed -n 's/^matrix=//p' /tmp/plan.out | python3 -m json.tool
+          echo "--- 其余输出 ---"
+          grep -v '^matrix=' /tmp/plan.out
+          cat /tmp/plan.out >> "$GITHUB_OUTPUT"
 
   build:
     needs: plan
