@@ -55,6 +55,8 @@ docker pull a76yyyy/ddddocr:latest
 - workflow_dispatch 提供两个输入：
   - `push`（默认 **false**）：仅执行完整构建验证，**不推送任何镜像**，用于发布前验证
   - `platforms`（默认空 = 全部 9 平台，含 loong64）：可指定平台子集加速迭代，如 `linux/riscv64,linux/arm64`（逗号分隔、不要空格）。⚠️ 子集构建若同时勾选 push，会以不完整 manifest 覆盖对应 tag，仅供验证时使用
+- 冒烟测试（与构建 job 并行，互不遮蔽）：`smoke-ocr` job 以 linux/amd64 构建全栈镜像并运行 `tests/smoke-ocr.sh`（cv2/numpy/onnxruntime/ddddocr import、DdddOcr 模型加载、合成验证码分类+检测推理链路）；`smoke-degraded` job 以 linux/386 构建降级镜像并运行 `tests/smoke-degraded.sh`（python3 可用 + libprotobuf-lite 在位）。tag 发布与 dispatch 均会执行
+- 构建期自检：完整 OCR 栈分支在 `apk del .build_deps` 后断言 `import ddddocr/onnxruntime/cv2` + `DdddOcr` 实例化——sympy/mpmath 清理或依赖卸载引入的运行时断裂在构建阶段即暴露
 - loong64 使用独立 Dockerfile（`Dockerfile.loong64`，仅基础镜像不同）构建并合并进主 tag 的多架构 manifest；CI 含 Dockerfile 同步校验，防止两个文件演化漂移
 - 勾选 `push` 或推送版本 tag（如 `1.6.1`）时才真正发布到 ghcr.io 与 Docker Hub，且 tag 发布始终为全平台构建
 - tag 发布使用 `ddddocr.version` 锁定的上游 commit；dispatch 默认跟随上游 master

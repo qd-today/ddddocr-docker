@@ -256,3 +256,56 @@ jobs:
           fi
         done <<< "$(echo "${{ steps.meta.outputs.tags }}" | sort -u)"
         exit $FAIL
+
+  # 冒烟测试：与构建 job 并行（不 needs），单平台 --load 到本地 docker 后运行
+  # tests/ 脚本。两者独立信号——构建失败与运行时失败分别可见，互不遮蔽
+  smoke-ocr:
+    runs-on: ubuntu-latest
+    name: Smoke test job - full OCR stack (linux/amd64)
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build test image (linux/amd64, load to local docker)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ddddocr-smoke:test
+          provenance: false
+      # 脚本经 stdin 喂给容器（sh -s），无需 bind mount，任何环境可用
+      - name: Run smoke tests
+        run: docker run --rm -i ddddocr-smoke:test sh -s < tests/smoke-ocr.sh
+
+  # 降级分支（386/armv6/s390x 无 OCR 栈）冒烟测试：验证 python3 与
+  # libprotobuf-lite 在最终镜像状态可用；386 需 QEMU 但无编译、很快
+  smoke-degraded:
+    runs-on: ubuntu-latest
+    name: Smoke test job - degraded image (linux/386)
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build test image (linux/386, load to local docker)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/386
+          load: true
+          push: false
+          tags: ddddocr-smoke-degraded:test
+          provenance: false
+      - name: Run smoke tests
+        run: docker run --rm -i ddddocr-smoke-degraded:test sh -s < tests/smoke-degraded.sh
