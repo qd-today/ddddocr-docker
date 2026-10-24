@@ -41,10 +41,8 @@ jobs:
     name: Plan build groups
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      smoke_matrix: ${{ steps.plan.outputs.smoke_matrix }}
       expected: ${{ steps.plan.outputs.expected }}
-      has_amd64: ${{ steps.plan.outputs.has_amd64 }}
-      has_386: ${{ steps.plan.outputs.has_386 }}
-      has_arm64: ${{ steps.plan.outputs.has_arm64 }}
       full: ${{ steps.plan.outputs.full }}
       dddocr_ref: ${{ steps.pin.outputs.ref }}
     steps:
@@ -116,16 +114,36 @@ jobs:
 
           print("matrix=" + json.dumps({"include": include}))
           print("expected=" + ",".join(plats))
-          # 必须输出小写 true/false：下游 job/step 的 if 条件是字符串比较
-          print("has_amd64=%s" % str("linux/amd64" in plats).lower())
-          print("has_386=%s" % str("linux/386" in plats).lower())
-          print("has_arm64=%s" % str("linux/arm64" in plats).lower())
           print("full=%s" % str(sorted(plats) == sorted(ALL)).lower())
+
+          # 冒烟矩阵：每个平台一个 job，用对应构建组的层缓存重建单平台镜像后真跑。
+          # 这样行为验证覆盖全部 9 平台（6 个 OCR + 3 个空壳），而不是只靠构建期断言；
+          # 构建期只留「产物自洽」的 import 级检查
+          GROUP_OF = {
+              "linux/amd64": "x86", "linux/386": "x86",
+              "linux/arm64": "arm", "linux/arm/v7": "arm", "linux/arm/v6": "arm",
+              "linux/ppc64le": "ppc64le", "linux/s390x": "ppc64le",
+              "linux/riscv64": "riscv64", "linux/loong64": "loong64",
+          }
+          OCR = {"linux/amd64", "linux/arm64", "linux/arm/v7",
+                 "linux/ppc64le", "linux/riscv64", "linux/loong64"}
+          smoke = []
+          for p in plats:
+              smoke.append({
+                  "platform": p,
+                  "group": GROUP_OF[p],
+                  "kind": "ocr" if p in OCR else "degraded",
+                  # 只在本机原生架构上直接跑；其余跨架构平台用 QEMU（runner 仍留 x64）
+                  "runner": arm_runner if p == "linux/arm64" else "ubuntu-latest",
+              })
+          print("smoke_matrix=" + json.dumps({"include": smoke}))
           PY
           echo "--- 构建分组 ---"
           sed -n 's/^matrix=//p' /tmp/plan.out | python3 -m json.tool
+          echo "--- 冒烟矩阵 ---"
+          sed -n 's/^smoke_matrix=//p' /tmp/plan.out | python3 -m json.tool
           echo "--- 其余输出 ---"
-          grep -v '^matrix=' /tmp/plan.out
+          grep -Ev '^(matrix|smoke_matrix)=' /tmp/plan.out
           cat /tmp/plan.out >> "$GITHUB_OUTPUT"
 
   build:
@@ -189,108 +207,55 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # ---- 冒烟测试：与构建解耦的独立信号源。用 build 阶段写下的层缓存重建单平台镜像
-  # （命中缓存 = 秒级，不重复编译），只验证“运行时能不能真的跑起来”。
-  # build-args 必须与 build 阶段完全一致，否则缓存必然不命中
-  smoke-ocr:
+  # ---- 冒烟测试：与构建解耦的独立信号源。
+  # 每个平台一个 job：用对应构建组的层缓存重建单平台镜像（命中缓存 = 秒级，不重新编译），
+  # 再在真实环境里跑该平台镜像。行为验证因此覆盖全部 9 平台，而构建期只留 import 级自洽检查。
+  # 6 个 OCR 平台跑 tests/ocr-selfcheck.py（真实推理链路），3 个空壳平台跑
+  # tests/smoke-degraded.sh（断言「确实没有 OCR」的契约）。
+  smoke:
     needs: [plan, build]
-    name: Smoke - full OCR stack (linux/amd64)
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    if: ${{ needs.plan.outputs.has_amd64 == 'true' && needs.build.result == 'success' }}
+    name: Smoke ${{ matrix.platform }} (${{ matrix.kind }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    if: ${{ needs.build.result == 'success' }}
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.smoke_matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Set up QEMU
+        # 跨架构平台（armv7/armv6/ppc64le/s390x/riscv64/loong64，以及回退模式下的 arm64）
+        # 需要 binfmt 才能在 x64 runner 上执行；本机原生架构不走 qemu
+        uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Materialize image from cache (linux/amd64)
+      - name: Materialize image from cache (${{ matrix.platform }})
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
+          file: ./${{ matrix.group == 'loong64' && 'Dockerfile.loong64' || 'Dockerfile' }}
+          platforms: ${{ matrix.platform }}
           load: true
           push: false
           tags: ddddocr-smoke:test
           provenance: false
+          # build-args 必须与 build 阶段完全一致，否则缓存必然不命中（会退化成全量重编译）
           build-args: |
             DDDDOCR_VERSION=${{ needs.plan.outputs.dddocr_ref }}
-          cache-from: type=gha,scope=ddddocr-x86
-      # 脚本经 stdin 喂给容器（sh -s），无需 bind mount，任何环境可用
-      - name: Run smoke tests
-        run: docker run --rm -i ddddocr-smoke:test sh -s < tests/smoke-ocr.sh
-
-  # arm64 运行时冒烟：跑在原生 arm64 runner（无 QEMU），验证 arm64 镜像里源码编译的
-  # OpenCV / onnxruntime 能真正完成「解码 + ONNX 推理 + 解码输出」——构建期断言只验到 import 与建模
-  smoke-arm:
-    needs: [plan, build]
-    name: Smoke - OCR stack (linux/arm64)
-    runs-on: ${{ github.event.inputs.native_arm == 'false' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
-    timeout-minutes: 120
-    if: ${{ needs.plan.outputs.has_arm64 == 'true' && needs.build.result == 'success' }}
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up QEMU
-        # native_arm 被取消时本 job 回退到 x64 runner，arm64 镜像需要 QEMU 才能执行
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Materialize image from cache (linux/arm64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/arm64
-          load: true
-          push: false
-          tags: ddddocr-smoke-arm:test
-          provenance: false
-          build-args: |
-            DDDDOCR_VERSION=${{ needs.plan.outputs.dddocr_ref }}
-          cache-from: type=gha,scope=ddddocr-arm
-      - name: Run smoke tests
-        run: docker run --rm -i ddddocr-smoke-arm:test sh -s < tests/smoke-ocr.sh
-
-  # 降级分支（386/armv6/s390x 无 OCR 栈）冒烟：验证 python3 与 libprotobuf-lite
-  # 在最终镜像状态可用；386 需 QEMU 但无编译，很快
-  smoke-degraded:
-    needs: [plan, build]
-    name: Smoke - degraded image (linux/386)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    if: ${{ needs.plan.outputs.has_386 == 'true' && needs.build.result == 'success' }}
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Materialize image from cache (linux/386)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/386
-          load: true
-          push: false
-          tags: ddddocr-smoke-degraded:test
-          provenance: false
-          build-args: |
-            DDDDOCR_VERSION=${{ needs.plan.outputs.dddocr_ref }}
-          cache-from: type=gha,scope=ddddocr-x86
-      - name: Run smoke tests
-        run: docker run --rm -i ddddocr-smoke-degraded:test sh -s < tests/smoke-degraded.sh
+          cache-from: type=gha,scope=ddddocr-${{ matrix.group }}
+      # 脚本经 stdin 喂给容器（python3 - / sh -s），无需把文件塞进镜像，也用不到 bind mount
+      - name: Run OCR selfcheck
+        if: ${{ matrix.kind == 'ocr' }}
+        run: docker run --rm -i --platform ${{ matrix.platform }} ddddocr-smoke:test python3 - < tests/ocr-selfcheck.py
+      - name: Run degraded-image contract check
+        if: ${{ matrix.kind == 'degraded' }}
+        run: docker run --rm -i --platform ${{ matrix.platform }} ddddocr-smoke:test sh -s < tests/smoke-degraded.sh
 
   publish:
-    needs: [plan, build, smoke-ocr, smoke-arm, smoke-degraded]
+    needs: [plan, build, smoke]
     name: Merge digests and publish
     runs-on: ubuntu-latest
     timeout-minutes: 30

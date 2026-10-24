@@ -75,7 +75,7 @@ plan    计算架构分组（按 dispatch 的 platforms 输入裁剪）
   ├─ build riscv64  (ubuntu-latest)     riscv64
   └─ build loong64  (ubuntu-latest)     loong64（独立 Dockerfile）
         ↓ 全部构建成功
-  smoke-ocr / smoke-arm / smoke-degraded   从构建层缓存复用镜像，实跑推理链路
+  smoke（9 个平台各一个 job）  从构建层缓存复用镜像，逐平台实跑（6 OCR 推理 + 3 空壳契约）
         ↓ 全部冒烟通过
   publish  各架构组按 digest 合并成正式 tag → 校验 manifest 平台完整性
 ```
@@ -100,15 +100,22 @@ plan    计算架构分组（按 dispatch 的 platforms 输入裁剪）
 | `native_arm` | true | 用 `ubuntu-24.04-arm` 原生构建 arm64（比 QEMU 快 3-5 倍）；该 runner 不可用时取消勾选回退 QEMU |
 | `allow_partial_publish` | false | 逃生阀：允许用平台子集发布 |
 
-**测试防线（三层）**：
+**测试防线（两层，都在构建之外）**：
 
-- **构建期断言（全 9 平台）**：`apk del .build_deps` 后在最终镜像状态下真跑一次
-  「图像编码 → ONNX 前向 → 解码输出」（分类 + 检测），并校验 `pyconfig.h` 存活。
-  ppc64le/riscv64/loong64 的 OpenCV/onnxruntime 都是 QEMU 下源码编译，架构相关的
-  ABI/数值问题只有真实前向才会暴露——冒烟 job 只覆盖 amd64/arm64，剩下 7 个平台靠这层兜底
-- **冒烟 job**：amd64 全栈、arm64（原生 runner）全栈、386 降级分支，各自独立 job 报告信号
+- **per-arch 冒烟矩阵（9 个 job，每平台一个）**：用构建阶段的层缓存重建单平台镜像
+  （命中缓存 = 秒级，不重新编译），再在该架构上真跑：
+  - 6 个 OCR 平台执行 `tests/ocr-selfcheck.py`：依赖 import → 模型加载 → 图像编码 →
+    ONNX 前向 → 解码输出。ppc64le/riscv64/loong64 的 OpenCV/onnxruntime 都是 QEMU 下
+    源码编译，架构相关的 ABI/数值问题只有真实前向才会暴露
+  - 3 个空壳平台执行 `tests/smoke-degraded.sh`：断言 python3 可用、libprotobuf-lite 在位，
+    并**确认 `ddddocr`/`cv2` 确实不存在**（与下面「空壳镜像」一节的契约一一对应）
+  - 脚本用 stdin 喂进容器（`python3 -` / `sh -s`），不进镜像、不依赖 bind mount
 - **发布后 manifest 断言**：每个正式 tag 的平台集合必须与计划完全一致，不一致直接 fail
   （1.6.1 那次 `latest` 被单架构覆盖的事故，从此由 CI 自动拦截）
+
+> 构建期只保留「产物自洽」的微秒级断言（`import ddddocr, onnxruntime, cv2` 通过 +
+> `pyconfig.h` 存活）。**推理不在构建期跑**——那会把测试塞进构建、混淆「构建失败」与
+> 「运行时失败」两种信号，也让产物在已知运行时损坏时无法单独构建出来调试。
 
 **其他**：
 
