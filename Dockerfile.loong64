@@ -89,9 +89,31 @@ case "${TARGETPLATFORM}" in
         install_ddddocr
         # .build_deps 内含 git/cmake/编译器/头文件等构建期工具，构建结束全部卸载（file/magic.mgc 未安装，bash 保留）
         $APK_CMD del .build_deps
-        # 构建期自检：OCR 栈在最终镜像状态（.build_deps 已卸）下可用——
+        # 构建期自检（全平台，最终镜像状态——.build_deps 已卸）：
+        # 不只是 import 成功，必须真正跑一次「图像编码 -> ONNX 前向 -> 解码输出」。
+        # ppc64le/riscv64/loong64 的 OpenCV 与 onnxruntime 都在 QEMU 下源码编译，
+        # 架构相关的 ABI/数值问题只有跑真实前向才会暴露（冒烟 job 只覆盖 amd64/arm64）。
         # 防 sympy/mpmath 清理或 apk del 引入的运行时断裂，构建阶段即暴露
-        python3 -c "import ddddocr, onnxruntime, cv2; ddddocr.DdddOcr(show_ad=False); print('ddddocr OCR stack OK')"
+        python3 - <<'PYCHECK'
+import cv2
+import ddddocr
+import numpy as np
+import onnxruntime
+
+img = np.full((40, 120, 3), 255, dtype=np.uint8)
+cv2.putText(img, "AB12", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
+data = cv2.imencode(".png", img)[1].tobytes()
+
+# ddddocr 1.6.x 按功能分类型实例化：默认 ocr=True（验证码分类）；det=True 才是目标检测，
+# OCR 类型实例调 detection() 会抛 DDDDOCRError。不断言识别准确率（合成图与真实分布有差异），
+# 只断言链路完整、输出结构合理
+text = ddddocr.DdddOcr(show_ad=False).classification(data)
+boxes = ddddocr.DdddOcr(det=True, show_ad=False).detection(data)
+assert isinstance(text, str) and 1 <= len(text) <= 6, text
+assert isinstance(boxes, list), boxes
+print("OCR stack OK: onnxruntime", onnxruntime.__version__,
+      "| cv2", cv2.__version__, "| classification", repr(text), "| det", len(boxes))
+PYCHECK
         # 防御性断言：pyconfig.h 必须存活（3.24 起归 python3 包；它是下游镜像编译 C 扩展的前提，
         # 曾在 2290fdc 清理步骤中被 rm -rf /usr/include 误删，导致 pycurl-docker 需要 apk fix python3 兜底）
         ls /usr/include/python3.*/pyconfig.h
