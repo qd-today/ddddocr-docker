@@ -1,132 +1,153 @@
-# **ddddocr-Docker**
+# ddddocr
 
-## **Repository**
+基于 Alpine 的 [ddddocr](https://github.com/sml2h3/ddddocr) 运行环境：ddddocr 与它依赖的
+OpenCV、onnxruntime 一并预编译，容器内 `import ddddocr` 即可使用，不需要在目标机器上准备
+编译工具链，也不需要自行处理 musl 下的依赖。
 
-**Github :** [https://github.com/qd-today/ddddocr-docker](https://github.com/qd-today/ddddocr-docker)
+- Docker Hub：<https://hub.docker.com/r/a76yyyy/ddddocr>
+- 源码：[qd-today/ddddocr-docker](https://github.com/qd-today/ddddocr-docker)
 
-**DockerHub :** [https://hub.docker.com/r/a76yyyy/ddddocr](https://hub.docker.com/r/a76yyyy/ddddocr)
+## 快速开始
 
 ```bash
 docker pull a76yyyy/ddddocr:latest
 ```
 
-## **这是什么**
-
-基于 Alpine 的 ddddocr 运行环境：ddddocr（通用验证码识别）连同它依赖的 OpenCV、
-onnxruntime 一起预编译好，镜像内 `import ddddocr` 即可用——目标机器不需要编译工具链，
-也不需要自己处理 musl 下的依赖。
-
-- 支持验证码分类（`classification`）与目标检测（`detection`）两种用法
-- 可直接 `docker run` 跑脚本，也可作为基座镜像被上层复用（`FROM a76yyyy/ddddocr:latest`）
-- 完整 OCR 能力覆盖 amd64 / arm64 / armv7 / ppc64le / riscv64 / loong64，其余架构见「平台支持矩阵」
-
-## **快速开始**
+识别一张本地图片，结果打印到标准输出：
 
 ```bash
-# 把本地验证码图片挂进容器，识别结果打印到标准输出
 docker run --rm -v "$PWD/captcha.png:/c.png" a76yyyy/ddddocr:latest \
   python3 -c "import ddddocr; print(ddddocr.DdddOcr(show_ad=False).classification(open('/c.png','rb').read()))"
 ```
 
+作为基础镜像使用：
+
 ```dockerfile
-# 作为基座镜像：镜像内已有 ddddocr / cv2 / onnxruntime
 FROM a76yyyy/ddddocr:latest
 ```
 
-## **VERSION**
+镜像内已有 ddddocr、cv2 与 onnxruntime，直接 import 即可：
 
-- ALPINE_VERSION == v3.24
-- PYTHON_VERSION == 3.14
-- OPENCV_VERSION == 4.14.0（源码编译最小化构建：仅 core/imgproc/imgcodecs + Python 绑定，无 GUI/视频后端）
-- DDDDOCR_VERSION == 1.6.1（上游未打版本 tag，发布时以 `ddddocr.version` 文件锁定 commit SHA）
+```python
+import ddddocr
 
-## **版本策略**
+ocr = ddddocr.DdddOcr(show_ad=False)
+text = ocr.classification(image_bytes)        # 验证码分类
 
-- `latest` 标签：跟随上游 master，经 workflow_dispatch（勾选 push）或推送版本 tag 时构建发布（默认分支 main 的普通推送不触发构建，仅同步 Docker Hub 描述）
-- 版本号标签（如 `1.6.1`）：与 ddddocr 上游版本对齐，构建时使用 `ddddocr.version` 中锁定的 commit，可复现
-- 发布新版本流程：更新 `ddddocr.version` 为上游目标 commit → 打对应版本 tag → CI 自动构建并推送
+det = ddddocr.DdddOcr(det=True, show_ad=False)
+boxes = det.detection(image_bytes)            # 目标检测
+```
 
-## **平台支持矩阵**
+## 镜像内容
 
-| 平台 | 能力 | OpenCV 来源 | 镜像体积* | 说明 |
+| 组件 | 版本 | 说明 |
+|---|---|---|
+| Alpine | 3.24 | 基础镜像 |
+| Python | 3.14 | |
+| ddddocr | 1.6.1 | 上游未打版本 tag，版本由仓库内 `ddddocr.version` 锁定的 commit SHA 决定 |
+| OpenCV | 4.14.0 | 源码编译，仅 core / imgproc / imgcodecs 与 Python 绑定，无 GUI 与视频后端 |
+| onnxruntime | Alpine 包 1.24.4 | 平台可用性见下节 |
+
+## 支持的平台
+
+| 平台 | OCR 能力 | 镜像体积 |
+|---|---|---|
+| linux/amd64 | ✓ | ~465 MB |
+| linux/arm64 | ✓ | ~465 MB |
+| linux/arm/v7 | ✓ | ~465 MB |
+| linux/ppc64le | ✓ | ~465 MB |
+| linux/riscv64 | ✓ | ~465 MB |
+| linux/loong64 | ✓ | ~465 MB |
+| linux/386、linux/arm/v6、linux/s390x | ✗ | ~50 MB |
+
+体积为未压缩值，所有具备 OCR 能力的平台一致。
+
+### 不提供 OCR 的三个平台
+
+`linux/386`、`linux/arm/v6`、`linux/s390x` 的镜像里只有 python3 与 libprotobuf-lite，
+既没有 OpenCV，也没有 ddddocr 包本身——`import ddddocr` 会直接抛 `ModuleNotFoundError`。
+`docker pull` 在这些架构上会成功，但拉到的镜像无法做验证码识别。
+
+保留它们是为了让 `latest` 的多架构 manifest 覆盖完整，使以本镜像为基础的项目
+（如 pycurl-docker 的 `FROM a76yyyy/ddddocr:latest`）在这些架构上仍能构建——那些场景
+只需要 python3 与 libprotobuf-lite。要在这些架构上识别验证码，需自行编译 onnxruntime
+的 Python 绑定。
+
+三个平台缺失的环节并不相同：
+
+| 平台 | Alpine 架构名 | onnxruntime 库 | Python 绑定 | 原因 |
 |---|---|---|---|---|
-| linux/amd64 | ✅ 完整 OCR | 源码编译 4.14.0（最小化） | ~465MB | 主平台 |
-| linux/arm64 | ✅ 完整 OCR | 源码编译 4.14.0（最小化） | ~465MB | 主平台 |
-| linux/arm/v7 | ✅ 完整 OCR | 源码编译 4.14.0（最小化） | ~465MB | |
-| linux/ppc64le | ✅ 完整 OCR | 源码编译 4.14.0（最小化） | ~465MB | QEMU 下编译耗时较长 |
-| linux/riscv64 | ✅ 完整 OCR | 源码编译 4.14.0（最小化） | ~465MB | QEMU 下编译耗时较长 |
-| linux/loong64 | ✅ 完整 OCR | 源码编译 4.14.0（最小化） | ~465MB | 基础镜像用 `ghcr.io/loong64/alpine:3.24`（龙芯社区构建，因 Docker Hub 官方无 loong64），见下方说明 |
-| linux/386、linux/arm/v6、linux/s390x | ❌ **空壳（无任何 OCR 能力）** | 无 | ~50MB | 见下方警告 |
+| linux/386 | `x86` | ✗ | ✗ | 上游在 x86 上编译失败，APKBUILD 标注 `arch="all !s390x !x86"` |
+| linux/s390x | `s390x` | ✗ | ✗ | 同上 |
+| linux/arm/v6 | `armhf` | ✓ | ✗ | `flatbuffers` 在 armhf 被整体排除（`arch="all !armhf"`，注释「armhf: blocked by bus error in tests」），`py3-flatbuffers` 因此缺失，onnxruntime 的 Python 子包被禁用；C 库本身可用 |
 
-\* 体积为未压缩估算，全部 OCR 平台一致（约 465MB）。
+### loong64 的基础镜像
 
-> ### ⚠️ 386 / armv6 / s390x 是「空壳镜像」，不能用于验证码识别
->
-> 镜像里**只有 python3 + libprotobuf-lite，没有 OpenCV，也没有 ddddocr 包本身**：
->
-> - `import ddddocr` 直接 `ModuleNotFoundError`
-> - 任何依赖 OCR 的功能（qd 的验证码识别任务）在这些平台上**必然失败**
-> - `docker pull a76yyyy/ddddocr:latest` 在这些架构上会「成功」，但拉到的就是空壳
->
-> 三个平台的缺失环节不同：
->
-> | 平台 | Alpine 架构名 | `onnxruntime` C 库 | `py3-onnxruntime` | 原因 |
-> |---|---|---|---|---|
-> | linux/386 | `x86` | ✗ | ✗ | 上游在 x86 上编译失败，APKBUILD 标注 `arch="all !s390x !x86"` |
-> | linux/s390x | `s390x` | ✗ | ✗ | 同上 |
-> | linux/arm/v6 | `armhf` | ✓ | ✗ | `flatbuffers` 在 armhf 被整体排除（`arch="all !armhf"`，注释「armhf: blocked by bus error in tests」），`py3-flatbuffers` 因此缺失，onnxruntime 的 py3 子包被禁用；C 库本身可用 |
->
-> 保留这三个平台的唯一原因：让 `latest` 多架构 manifest 覆盖完整，使上层镜像
-> （pycurl-docker 等 `FROM a76yyyy/ddddocr:latest`）在这些架构上仍能正常构建
-> ——它们本来就只需要 python3 与 libprotobuf-lite。若你需要在这些架构上做 OCR，
-> 请改为自建（自行编译 onnxruntime）。
+Docker Hub 的官方 alpine 镜像没有 loong64 变体，因此 loong64 使用龙芯社区维护的
+[loong64/docker-library](https://github.com/loong64/docker-library)（`ghcr.io/loong64/alpine`，
+源码来自 docker-library）。这是第三方依赖，若其停止维护，需回退到 `FROM scratch` 加
+minirootfs 的方案。loong64 由独立 Dockerfile 构建后合并进主 tag 的 manifest，同时保留
+`latest-loong64` 这类后缀 tag 可直接拉取。
 
-**loong64 特别说明**：Docker Hub 官方 alpine 镜像不提供 loong64 变体，故 loong64 构建使用龙芯社区维护的 [loong64/docker-library](https://github.com/loong64/docker-library)（ghcr.io/loong64/alpine，QEMU on GitHub Actions 构建，源码来自 docker-library）。该基础镜像为第三方依赖，若其停止维护需回退至 `FROM scratch` + minirootfs 方案。loong64 变体通过独立 Dockerfile 构建后合并进主 tag 的多架构 manifest，同时保留 `-loong64` 后缀 tag（如 `latest-loong64`）供直接拉取。
+## 标签
 
-## **构建说明**
+| 标签 | 含义 |
+|---|---|
+| `latest` | 跟随上游 master，每次发布重新构建 |
+| `1.6.1` 等版本号 | 与 ddddocr 上游版本对齐，使用 `ddddocr.version` 锁定的 commit，可复现 |
+| `latest-loong64` 等 | loong64 单架构 tag |
 
-- OpenCV 不采用 apk 的 py3-opencv：其 Qt/OpenGL/FFmpeg 依赖链约 236MB，ddddocr 用不到；且 PyPI 无 musllinux wheel，故改为源码编译
-- 编译产物经 `strip --strip-unneeded` 剥离符号，各 OCR 平台镜像约 465MB
-- 体积优化（约 50MB 死重清理，不影响任何功能）：不安装 file/magic.mgc 特征库、git 归入 .build_deps 用完即卸、删除 OpenCV haarcascades/lbpcascades 级联数据与 `/usr/include/opencv4` 头文件（注意保留 `/usr/include` 其余内容——Alpine 3.24 起 `pyconfig.h` 由 python3 包拥有，是下游镜像编译 C 扩展的前提）、清 sympy/mpmath 元数据残留与 numpy 测试套件
-- 本地构建加速：`docker build --build-arg APK_MIRROR=https://mirrors.tuna.tsinghua.edu.cn .`
+发布新版本：把 `ddddocr.version` 更新为目标 commit，推对应版本号 tag，CI 构建并推送。
+默认分支的普通推送不触发构建，仅同步 Docker Hub 上的说明；`latest` 的日常更新走
+workflow_dispatch（勾选 push）。
 
-### **CPU 基线优化（`OPENCV_CPU_BASELINE`）**
+## 构建
 
-`--build-arg OPENCV_CPU_BASELINE=NEON` 只作用于本仓库自编的 OpenCV；默认留空，即交由
-OpenCV 自行决定（ARM32 上 OpenCV 不设基线，走纯标量路径）。该参数只在 ARM32 上有意义——
-其余架构 OpenCV 会自己检测并启用 SSE2/NEON 等基线。
+- **OpenCV 源码编译**：apk 的 `py3-opencv` 会带入 Qt / OpenGL / FFmpeg 依赖链（约 236 MB），
+  ddddocr 用不到；PyPI 也没有 musllinux wheel，因此改为自编最小化版本。
+- **镜像精简**（约 50 MB，不影响功能）：不安装 file 的 magic.mgc 特征库；git 归入构建期
+  临时依赖，用完即卸；删除 OpenCV 的 haarcascades / lbpcascades 与 `/usr/include/opencv4`
+  头文件（`/usr/include` 的其余内容必须保留——Alpine 3.24 起 `pyconfig.h` 由 python3 包提供，
+  是上层镜像编译 C 扩展的前提）；清理 sympy / mpmath 元数据残留与 numpy 测试套件。
+- **剥离符号**：构建产物经 `strip --strip-unneeded` 处理。
+- **本地构建加速**：`docker build --build-arg APK_MIRROR=https://mirrors.tuna.tsinghua.edu.cn .`
 
-不设默认的原因：
+### ARMv7 的 CPU 基线（`OPENCV_CPU_BASELINE`）
 
-- **收益到不了端到端**：ARM32 开 NEON 后预处理单步快 1.4–2.0×（cvtColor 1.85×、
-  GaussianBlur 1.40×、threshold 2.00×，合计 3.59 → 2.54 ms），但验证码图片只有 120×40
-  量级，`imdecode + resize + gray` 合计不到 1 ms，且 OCR 绝大部分时间在 onnxruntime
-  推理上——而它本身已经是 NEON 版。大图的预处理才看得出差别
-- **兼容性**：OpenCV 以 NEON 为基线后，`import cv2` 及任何 OpenCV 调用在无 NEON 的 ARMv7
-  （如 Marvell Armada 370/XP、部分 Cortex-A5）上会 SIGILL。本镜像同时被上层当作**不含 OCR
-  的 Python 基座**（pycurl 等），这类用法不需要 NEON，保持标量可继续兼容这部分硬件
-- **构建成本**：约 4 倍（NEON 基线会把所有向量化分支实例化编译）
+`--build-arg OPENCV_CPU_BASELINE=NEON` 让自编的 OpenCV 以 NEON 为基线；默认留空，即 ARM32
+上不设基线、走标量路径。该参数只影响 OpenCV，也只对 ARM32 有意义——其余架构由 OpenCV
+自行检测并启用 SSE2 / NEON 等基线。
 
-需要说明的是：**只用来做 OCR 时，armv7 本来就要求 NEON**——Alpine 的 armv7 onnxruntime
-是 NEON 构建（见下），而 onnxruntime 的 MLAS 只在 ARM64 上做运行时特性检测，ARM32 没有
-回退路径。上面「兼容性」一条针对的是把本镜像当纯 Python 基座使用的场景。
+默认关闭的原因：
 
-**onnxruntime 不需要为 NEON 自编**：其上游 `cmake/onnxruntime_mlas.cmake` 在
-`CMAKE_SYSTEM_PROCESSOR` 匹配 `^arm.*` 时无条件追加 `-mfpu=neon`，并编入
-`aarch32/QgemmU8X8KernelNeon.S` 等 NEON 内核，与发行版 CFLAGS 无关。因此 Alpine 的
-armv7 `py3-onnxruntime` 包本身就是 NEON 版本（`readelf -A` 可见
-`Tag_Advanced_SIMD_arch: NEONv1`），自编不会带来额外收益。
+- **收益落不到端到端**。ARM32 开 NEON 后预处理单步快 1.4–2.0×（cvtColor 1.85×、
+  GaussianBlur 1.40×、threshold 2.00×，合计 3.59 → 2.54 ms），但验证码图片在 120×40 量级，
+  `imdecode + resize + gray` 合计不到 1 ms；识别时间几乎都在 onnxruntime 推理上。
+- **兼容性**。以 NEON 为基线后，`import cv2` 及任何 OpenCV 调用在无 NEON 的 ARMv7
+  （如 Marvell Armada 370/XP、部分 Cortex-A5）上会触发 SIGILL。本镜像同时被用作不含 OCR
+  的 Python 基座，那类用法不需要 NEON。
+- **构建耗时约为 4 倍**——NEON 基线会把所有向量化分支实例化编译。
 
-基准可用 `tests/bench.py` 复现：`docker run --rm -i --platform linux/arm/v7 <image> python3 - < tests/bench.py`。
-须在能原生执行 AArch32 的机器上运行（QEMU 下墙钟由指令翻译主导，数字无意义）；
-脚本只输出数字、不做断言。
+onnxruntime 无需为 NEON 自编：上游 `cmake/onnxruntime_mlas.cmake` 对
+`CMAKE_SYSTEM_PROCESSOR` 匹配 `^arm.*` 的情况无条件追加 `-mfpu=neon` 并编译 NEON 内核，
+与发行版的编译参数无关，因此 Alpine 的 armv7 `py3-onnxruntime` 本身就是 NEON 版本
+（`readelf -A` 可见 `Tag_Advanced_SIMD_arch: NEONv1`）。这也意味着**仅用于 OCR 时，armv7
+本来就要求 CPU 支持 NEON**：MLAS 只在 ARM64 上做运行时特性检测，ARM32 没有回退路径。
+
+基准可用 `tests/bench.py` 复现：
+
+```bash
+docker run --rm -i --platform linux/arm/v7 <image> python3 - < tests/bench.py
+```
+
+该脚本需在能原生执行 AArch32 的机器上运行——QEMU 下墙钟由指令翻译主导，数字没有参考价值。
 
 ---
 
 <details>
-<summary><b>CI 架构（维护者向）</b>：构建 / 测试 / 发布三阶段解耦</summary>
+<summary>CI 架构（维护者）</summary>
 
-### **流水线**
+### 流水线
 
 ```
 plan    计算架构分组（按 dispatch 的 platforms 输入裁剪）
@@ -136,54 +157,55 @@ plan    计算架构分组（按 dispatch 的 platforms 输入裁剪）
   ├─ build riscv64  (ubuntu-latest)     riscv64
   └─ build loong64  (ubuntu-latest)     loong64（独立 Dockerfile）
         ↓ 全部构建成功
-  smoke（9 个平台各一个 job）  从构建层缓存复用镜像，逐平台实跑（6 OCR 推理 + 3 空壳契约）
+  smoke（9 个平台各一个 job）  复用构建层缓存重建镜像后逐平台实跑（6 个 OCR + 3 个降级检查）
         ↓ 全部冒烟通过
   publish  各架构组按 digest 合并成正式 tag → 校验 manifest 平台完整性
 ```
 
-### **设计原则**
+### 设计原则
 
-1. **发布即全绿**：`publish` 需要所有构建 + 所有冒烟 job 成功。任何测试失败都不会产生 tag
+1. **发布即全绿**：`publish` 需要所有构建与所有冒烟 job 成功，任何测试失败都不会产生 tag。
 2. **零重复编译**：构建阶段把层缓存写入 GHA cache（按架构组隔离 scope），冒烟与发布阶段
-   `cache-from` 命中同一份缓存，只做导出、不重新编译。同一 commit 的「验证构建 → 冒烟 → 发布」
-   三次跑都复用同一份产物
-3. **不产临时 tag**：发布模式下各架构组用 `push-by-digest` 推到 ghcr（无 tag），`publish`
-   用 `imagetools create` 把各组 digest 合并成正式多架构 tag，因此不会在 tag 列表里留下
-   可被拉取的一次性中间产物
+   `cache-from` 命中同一份缓存，只做导出。同一 commit 的「验证构建 → 冒烟 → 发布」复用同一份产物。
+3. **不产临时 tag**：发布模式下各架构组用 `push-by-digest` 推到 ghcr（不带 tag），`publish`
+   用 `imagetools create` 合并成正式多架构 tag，tag 列表里不会留下可被拉取的一次性中间产物。
 
-### **workflow_dispatch 输入**
+### workflow_dispatch 输入
 
 | 输入 | 默认 | 说明 |
 |---|---|---|
-| `push` | false | 不勾选 = 只构建 + 冒烟验证，**不发布任何镜像** |
-| `platforms` | 空（= 全部 9 平台） | 平台子集加速迭代，如 `linux/riscv64`。**子集构建默认禁止发布**（防止不完整 manifest 覆盖正式 tag），确需如此请勾 `allow_partial_publish` |
-| `native_arm` | true | 用 `ubuntu-24.04-arm` 原生构建 arm64（比 QEMU 快 3-5 倍）；该 runner 不可用时取消勾选回退 QEMU |
-| `allow_partial_publish` | false | 逃生阀：允许用平台子集发布 |
+| `push` | false | 不勾选即只构建与冒烟验证，不发布任何镜像 |
+| `platforms` | 空（全部 9 平台） | 平台子集，用于加速迭代，如 `linux/riscv64`。子集构建默认禁止发布，确需如此请勾 `allow_partial_publish` |
+| `native_arm` | true | 用 `ubuntu-24.04-arm` 原生构建 arm64（比 QEMU 快 3–5 倍）；该 runner 不可用时取消勾选回退 QEMU |
+| `allow_partial_publish` | false | 允许用平台子集发布 |
 
-### **测试防线（两层，都在构建之外）**
+### 测试防线
 
-- **per-arch 冒烟矩阵（9 个 job，每平台一个）**：用构建阶段的层缓存重建单平台镜像
-  （命中缓存 = 秒级，不重新编译），再在该架构上真跑 `tests/smoke.py`，模式由平台类型显式传入：
-  - 6 个 OCR 平台 `-- ocr`：依赖 import → 模型加载 → 图像编码 → ONNX 前向 → 解码输出。
-    ppc64le/riscv64/loong64 的 OpenCV/onnxruntime 都是 QEMU 下源码编译，架构相关的
-    ABI/数值问题只有真实前向才会暴露
-  - 3 个空壳平台 `-- degraded`：断言 python3 可用、libprotobuf-lite 在位，并**确认
-    `ddddocr`/`cv2`/`onnxruntime` 确实不存在**（与上面「空壳镜像」一节的契约一一对应）
-  - 模式由 CI 显式传入、不做自动探测：自动探测会在 ddddocr 意外缺失时静默降级成空壳检查
-    并通过，从而掩盖真实回归
-  - 脚本用 stdin 喂进容器（`python3 - <mode>`），不进镜像、不依赖 bind mount、不依赖外部网络
-- **发布后 manifest 断言**：每个正式 tag 的平台集合必须与计划完全一致，不一致直接 fail
-  （防止正式 tag 被不完整 manifest 覆盖）
+两层，都在构建之外。
 
-> 构建期只保留「产物自洽」的微秒级断言（`import ddddocr, onnxruntime, cv2` 通过 +
-> `pyconfig.h` 存活）。**推理不在构建期跑**——那会把测试塞进构建、混淆「构建失败」与
-> 「运行时失败」两种信号，也让产物在已知运行时损坏时无法单独构建出来调试。
+- **per-arch 冒烟矩阵**：9 个平台各一个 job，用构建阶段的层缓存重建单平台镜像（命中缓存
+  为秒级），再在该架构上真正运行 `tests/smoke.py`，模式由 CI 显式传入：
+  - 6 个具备 OCR 的平台传 `ocr`：依赖 import → 模型加载 → 图像编码 → ONNX 前向 → 解码输出。
+    ppc64le / riscv64 / loong64 的 OpenCV 与 onnxruntime 都在 QEMU 下源码编译，架构相关的
+    ABI 与数值问题只有真实前向才会暴露。
+  - 3 个无 OCR 的平台传 `degraded`：断言 python3 可用、libprotobuf-lite 在位，并确认
+    `ddddocr` / `cv2` / `onnxruntime` 确实不存在，与「不提供 OCR 的三个平台」一节一致。
+  - 模式由 CI 显式传入而不做自动探测：自动探测会在 ddddocr 意外缺失时静默降级成降级检查
+    并通过，掩盖真实回归。
+  - 脚本经 stdin 喂进容器（`python3 - <mode>`），不进镜像、不依赖 bind mount 与外部网络。
+- **发布后 manifest 断言**：每个正式 tag 的平台集合必须与计划完全一致，否则失败，防止正式
+  tag 被不完整 manifest 覆盖。
 
-### **其他**
+构建期只保留产物自洽的微秒级断言（`import ddddocr, onnxruntime, cv2` 通过、
+`pyconfig.h` 存活）。推理不在构建期执行——那会把测试塞进构建，混淆「构建失败」与
+「运行时失败」两种信号，也让产物在已知运行时损坏时无法单独构建出来排查。
 
-- loong64 使用独立 Dockerfile（`Dockerfile.loong64`，仅基础镜像不同）构建并合并进主 tag 的多架构 manifest；CI 含 Dockerfile 同步校验，防止两个文件演化漂移
-- 勾选 `push` 或推送版本 tag（如 `1.6.1`）时才真正发布到 ghcr.io 与 Docker Hub；tag 发布始终为全平台构建
-- tag 发布使用 `ddddocr.version` 锁定的上游 commit（可复现）；dispatch 默认跟随上游 master
-- 默认分支 main 的普通推送不触发构建，只同步 Docker Hub 描述
+### 其他
+
+- loong64 使用独立 Dockerfile（`Dockerfile.loong64`，仅基础镜像不同），CI 含两个文件的
+  同步校验，防止演化漂移。
+- 勾选 `push` 或推送版本 tag 时才真正发布到 ghcr.io 与 Docker Hub；tag 发布始终为全平台构建。
+- tag 发布使用 `ddddocr.version` 锁定的 commit，可复现；dispatch 默认跟随上游 master。
+- 默认分支的普通推送不触发构建，只同步 Docker Hub 说明。
 
 </details>
