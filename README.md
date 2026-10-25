@@ -99,9 +99,20 @@ minirootfs 的方案。loong64 由独立 Dockerfile 构建后合并进主 tag �
 | 解压后文件 | 约 297 MiB | `du -sh /`，与 `docker history` 各层 SIZE 之和一致 |
 | `docker images` 的 SIZE | 443 MiB（465 MB） | containerd 镜像存储下的磁盘占用 = 解压层 + 保留的压缩副本 |
 
-第三项约等于前两项之和（297 + 146 ≈ 443）：镜像存储同时保留解压后的快照和原始压缩
-blob，所以它比「解压后文件」多出一个压缩副本。同一 tag 缓存多个架构时，`docker images`
-会把这些平台的占用相加（本镜像显示 1.58 GB），要看单架构请用 `docker images --tree`。
+第三项约等于前两项之和（297 + 146 ≈ 443）：registry 上每一层都是一个 gzip 压缩的 tar
+（manifest 里记录它的 sha256 与字节数）。containerd 镜像存储会把这个原始 blob 按 digest
+原样留在本地（供 `docker save`、再推送与校验），同时再解压一份快照给容器运行，因此占两份。
+老式的 overlay2 镜像存储不保留 blob，那种环境只占解压后的约 297 MiB。
+
+在一台干净机器上拉取并运行（arm64）：
+
+| 动作 | 网络流量 | 新增磁盘 |
+|---|---|---|
+| `docker pull` | 146 MiB | containerd 存储约 465 MB（解压快照 + 压缩 blob）；overlay2 存储约 297 MiB |
+| `docker run` | 0 | 约 200 kB 的可写层，随容器写入增长 |
+
+只会落盘你拉取的那个架构。`docker images` 会把本机已缓存的其它架构一起计入 SIZE
+（本机显示 1.58 GB 是 5 个平台之和），看单架构请用 `docker images --tree`。
 
 镜像只有一个 `RUN` 层：构建期依赖（git、编译工具链等）在同一层内安装并在末尾删除，
 所以解压后的文件里不含编译工具链，也没有可回收的残留层。
