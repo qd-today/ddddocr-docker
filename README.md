@@ -46,7 +46,7 @@ boxes = det.detection(image_bytes)            # 目标检测
 | Python | 3.14 | |
 | ddddocr | 1.6.1 | 上游未打版本 tag，版本由仓库内 `ddddocr.version` 锁定的 commit SHA 决定 |
 | OpenCV | 4.14.0 | 源码编译，仅 core / imgproc / imgcodecs 与 Python 绑定，无 GUI 与视频后端 |
-| onnxruntime | Alpine 包 1.24.4 | 平台可用性见下节 |
+| onnxruntime | Alpine 包 1.24.4 | 386 / armv6 / s390x 只有 C 库，没有 Python 绑定 |
 
 ## 支持的平台
 
@@ -59,8 +59,6 @@ boxes = det.detection(image_bytes)            # 目标检测
 | linux/riscv64 | ✓ |
 | linux/loong64 | ✓ |
 | linux/386、linux/arm/v6、linux/s390x | ✗ |
-
-各平台体积见下节。
 
 ### 不提供 OCR 的三个平台
 
@@ -83,7 +81,7 @@ boxes = det.detection(image_bytes)            # 目标检测
 
 ### loong64 的基础镜像
 
-Docker Hub 的官方 alpine 镜像没有 loong64 变体，因此 loong64 使用龙芯社区维护的
+Docker Hub 的官方 alpine 镜像不提供 loong64 架构，因此 loong64 使用龙芯社区维护的
 [loong64/docker-library](https://github.com/loong64/docker-library)（`ghcr.io/loong64/alpine`，
 源码来自 docker-library）。这是第三方依赖，若其停止维护，需回退到 `FROM scratch` 加
 minirootfs 的方案。loong64 由独立 Dockerfile 构建后合并进主 tag 的 manifest，同时保留
@@ -131,7 +129,9 @@ workflow_dispatch（勾选 push）。
   头文件（`/usr/include` 的其余内容必须保留——Alpine 3.24 起 `pyconfig.h` 由 python3 包提供，
   是上层镜像编译 C 扩展的前提）；清理 sympy / mpmath 元数据残留与 numpy 测试套件。
 - **剥离符号**：构建产物经 `strip --strip-unneeded` 处理。
-- **本地构建加速**：`docker build --build-arg APK_MIRROR=https://mirrors.tuna.tsinghua.edu.cn .`
+- **本地构建加速**：三个参数留空即与 CI 一致——`APK_MIRROR`（apk 源）、`PIP_MIRROR`
+  （pip 索引）、`GIT_DOMAIN`（ddddocr 源码 clone 的 GitHub 前缀）。
+  例：`docker build --build-arg APK_MIRROR=https://mirrors.tuna.tsinghua.edu.cn .`
 
 ### ARMv7 的 CPU 基线（`OPENCV_CPU_BASELINE`）
 
@@ -141,27 +141,18 @@ workflow_dispatch（勾选 push）。
 
 默认关闭的原因：
 
-- **收益落不到端到端**。ARM32 开 NEON 后预处理单步快 1.4–2.0×（cvtColor 1.85×、
-  GaussianBlur 1.40×、threshold 2.00×，合计 3.59 → 2.54 ms），但验证码图片在 120×40 量级，
-  `imdecode + resize + gray` 合计不到 1 ms；识别时间几乎都在 onnxruntime 推理上。
-- **兼容性**。以 NEON 为基线后，`import cv2` 及任何 OpenCV 调用在无 NEON 的 ARMv7
+- **收益落不到端到端**：验证码图片在 120×40 量级，预处理合计不到 1 ms，而识别时间几乎
+  都在 onnxruntime 推理上。
+- **兼容性**：以 NEON 为基线后，`import cv2` 及任何 OpenCV 调用在无 NEON 的 ARMv7
   （如 Marvell Armada 370/XP、部分 Cortex-A5）上会触发 SIGILL。本镜像同时被用作不含 OCR
   的 Python 基座，那类用法不需要 NEON。
-- **构建耗时约为 4 倍**——NEON 基线会把所有向量化分支实例化编译。
+- **构建耗时明显增加**：NEON 基线会把所有向量化分支实例化编译。
 
 onnxruntime 无需为 NEON 自编：上游 `cmake/onnxruntime_mlas.cmake` 对
 `CMAKE_SYSTEM_PROCESSOR` 匹配 `^arm.*` 的情况无条件追加 `-mfpu=neon` 并编译 NEON 内核，
 与发行版的编译参数无关，因此 Alpine 的 armv7 `py3-onnxruntime` 本身就是 NEON 版本
 （`readelf -A` 可见 `Tag_Advanced_SIMD_arch: NEONv1`）。这也意味着**仅用于 OCR 时，armv7
 本来就要求 CPU 支持 NEON**：MLAS 只在 ARM64 上做运行时特性检测，ARM32 没有回退路径。
-
-基准可用 `tests/bench.py` 复现：
-
-```bash
-docker run --rm -i --platform linux/arm/v7 <image> python3 - < tests/bench.py
-```
-
-该脚本需在能原生执行 AArch32 的机器上运行——QEMU 下墙钟由指令翻译主导，数字没有参考价值。
 
 ---
 
@@ -190,6 +181,11 @@ plan    计算架构分组（按 dispatch 的 platforms 输入裁剪）
    `cache-from` 命中同一份缓存，只做导出。同一 commit 的「验证构建 → 冒烟 → 发布」复用同一份产物。
 3. **不产临时 tag**：发布模式下各架构组用 `push-by-digest` 推到 ghcr（不带 tag），`publish`
    用 `imagetools create` 合并成正式多架构 tag，tag 列表里不会留下可被拉取的一次性中间产物。
+
+### 其他
+
+ARM32 的 NEON 基准由 `Bench NEON.yml` 触发（`tests/bench.py`）。该脚本须在能原生执行
+AArch32 的机器上运行——QEMU 下墙钟由指令翻译主导，数字没有参考价值。
 
 ### workflow_dispatch 输入
 
