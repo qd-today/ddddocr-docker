@@ -10,6 +10,29 @@
 docker pull a76yyyy/ddddocr:latest
 ```
 
+## **这是什么**
+
+基于 Alpine 的 ddddocr 运行环境：ddddocr（通用验证码识别）连同它依赖的 OpenCV、
+onnxruntime 一起预编译好，镜像内 `import ddddocr` 即可用——目标机器不需要编译工具链，
+也不需要自己处理 musl 下的依赖。
+
+- 支持验证码分类（`classification`）与目标检测（`detection`）两种用法
+- 可直接 `docker run` 跑脚本，也可作为基座镜像被上层复用（`FROM a76yyyy/ddddocr:latest`）
+- 完整 OCR 能力覆盖 amd64 / arm64 / armv7 / ppc64le / riscv64 / loong64，其余架构见「平台支持矩阵」
+
+## **快速开始**
+
+```bash
+# 把本地验证码图片挂进容器，识别结果打印到标准输出
+docker run --rm -v "$PWD/captcha.png:/c.png" a76yyyy/ddddocr:latest \
+  python3 -c "import ddddocr; print(ddddocr.DdddOcr(show_ad=False).classification(open('/c.png','rb').read()))"
+```
+
+```dockerfile
+# 作为基座镜像：镜像内已有 ddddocr / cv2 / onnxruntime
+FROM a76yyyy/ddddocr:latest
+```
+
 ## **VERSION**
 
 - ALPINE_VERSION == v3.24
@@ -22,10 +45,6 @@ docker pull a76yyyy/ddddocr:latest
 - `latest` 标签：跟随上游 master，经 workflow_dispatch（勾选 push）或推送版本 tag 时构建发布（默认分支 main 的普通推送不触发构建，仅同步 Docker Hub 描述）
 - 版本号标签（如 `1.6.1`）：与 ddddocr 上游版本对齐，构建时使用 `ddddocr.version` 中锁定的 commit，可复现
 - 发布新版本流程：更新 `ddddocr.version` 为上游目标 commit → 打对应版本 tag → CI 自动构建并推送
-
-## **Tips**
-
-> Onnxruntime Builder does not currently support building i386 and s390x wheels!
 
 ## **平台支持矩阵**
 
