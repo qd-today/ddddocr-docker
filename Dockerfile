@@ -73,10 +73,14 @@ case "${TARGETPLATFORM}" in
         # （实测日志：arm/v7 Baseline 为空，而 arm64 是 "NEON FP16"）。
         # 构建不报错、冒烟也通过，只是 armv7 上 OCR 明显变慢——这类静默降级比编译失败更危险，
         # 所以下面既显式传 CMAKE_SYSTEM_PROCESSOR，又在 configure 后断言探测结果与基线。
+        # cmake_extra 用于 armv7：只传 CMAKE_SYSTEM_PROCESSOR 会被 cmake 在 project()
+        # 里用 uname 的结果覆盖（实测：-DCMAKE_SYSTEM_PROCESSOR=arm 后仍打印 aarch64），
+        # 必须同时给 CMAKE_SYSTEM_NAME 让 cmake 进入交叉编译模式，才会尊重我们指定的处理器。
+        cmake_extra=""
         case "${TARGETARCH}" in
             amd64)   cmake_proc=x86_64 ;;
             arm64)   cmake_proc=aarch64 ;;
-            arm)     cmake_proc=arm ;;   # armv7 走 ARM32 分支，NEON 才会被启用
+            arm)     cmake_proc=arm; cmake_extra="-DCMAKE_SYSTEM_NAME=Linux" ;;   # armv7 走 ARM32 分支，NEON 才会被启用
             386)     cmake_proc=i386 ;;
             ppc64le) cmake_proc=ppc64le ;;
             riscv64) cmake_proc=riscv64 ;;
@@ -86,7 +90,7 @@ case "${TARGETPLATFORM}" in
         cmake -S "/tmp/opencv-$OPENCV_VERSION" -B /tmp/opencv-build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr \
-            -DCMAKE_SYSTEM_PROCESSOR="${cmake_proc}" \
+            -DCMAKE_SYSTEM_PROCESSOR="${cmake_proc}" ${cmake_extra} \
             -DBUILD_LIST=core,imgproc,imgcodecs,python3 \
             -DBUILD_SHARED_LIBS=ON \
             -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF \
