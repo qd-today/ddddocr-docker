@@ -68,11 +68,10 @@ case "${TARGETPLATFORM}" in
         tar -C /tmp -xzf /tmp/opencv.tar.gz
         # OpenCV 的目标架构必须显式指定，不能让 cmake 从 uname 推断。
         # 在 GitHub 原生 arm64 runner 上，armv7 容器由内核 compat 模式直接执行（不经 QEMU），
-        # uname -m 返回 aarch64 -> cmake 打印 "Detected processor: aarch64" -> NEON 测试拿
-        # aarch64 的检查文件喂 arm32 编译器，必然失败 -> 静默退化成纯标量 OpenCV
-        # （实测日志：arm/v7 Baseline 为空，而 arm64 是 "NEON FP16"）。
-        # 构建不报错、冒烟也通过，只是 armv7 上 OCR 明显变慢——这类静默降级比编译失败更危险，
-        # 所以下面既显式传 CMAKE_SYSTEM_PROCESSOR，又在 configure 后断言探测结果与基线。
+        # uname -m 返回 aarch64 -> cmake 打印 "Detected processor: aarch64" -> 走进 AARCH64
+        # 分支：用 aarch64 的检查文件喂 arm32 编译器（NEON 测试 Failed），并按 AArch64 配置
+        # NEON_DOTPROD/NEON_BF16 等无效 dispatch。构建能过、冒烟也过，配置却是错的。
+        # 所以下面显式指定处理器，并在 configure 后用断言盯住探测结果。
         # cmake_extra 用于 armv7：只传 CMAKE_SYSTEM_PROCESSOR 会被 cmake 在 project()
         # 里用 uname 的结果覆盖（实测：-DCMAKE_SYSTEM_PROCESSOR=arm 后仍打印 aarch64），
         # 必须同时给 CMAKE_SYSTEM_NAME 让 cmake 进入交叉编译模式，才会尊重我们指定的处理器。
@@ -102,10 +101,14 @@ case "${TARGETPLATFORM}" in
         # 断言一：cmake 实际采用的处理器必须等于预期（防止 -DCMAKE_SYSTEM_PROCESSOR 被忽略）
         grep -q "Detected processor: ${cmake_proc}" /tmp/cmake.log || \
             { echo "ERROR: cmake 探测到的主机架构与目标 ${cmake_proc} 不一致"; grep "Detected processor" /tmp/cmake.log; exit 1; }
-        # 断言二：armv7 必须落在 NEON 基线上（这正是被 uname 骗掉的优化）
+        # 断言二：走对 ARM32 分支后，不应再出现 AArch64 专属的 dispatch 探测
+        # （NEON_DOTPROD/NEON_BF16 只在 AARCH64 分支里被定义）。注意 ARM32 的
+        # "Baseline:" 默认就是空的——NEON 在 armv7 属于可选项，OpenCV 只有显式
+        # -DENABLE_NEON=ON 才加 -mfpu=neon；Alpine 的 armhf 用户态以 armv6 为基线，
+        # 强制 NEON 会让 armv6-only 的板子跑不了 armv7 镜像，故不启用。
         if [ "$TARGETARCH" = "arm" ]; then
-            grep -qE "Baseline:.*NEON" /tmp/cmake.log || \
-                { echo "ERROR: armv7 未启用 NEON 基线，镜像会退化为纯标量"; grep -A2 "CPU/HW features" /tmp/cmake.log; exit 1; }
+            ! grep -qE "NEON_DOTPROD|NEON_BF16" /tmp/cmake.log || \
+                { echo "ERROR: armv7 构建仍带 AArch64 专属 dispatch，架构判定有误"; exit 1; }
         fi
         cmake --build /tmp/opencv-build -j"$(nproc)"
         cmake --install /tmp/opencv-build
