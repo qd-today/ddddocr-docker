@@ -129,6 +129,8 @@ case "${TARGETPLATFORM}" in
         rm -rf /usr/share/opencv4 /usr/include/opencv4
         find /usr/lib -name 'libopencv_*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true
         find /usr/lib/python3.*/site-packages/cv2 -name '*.so' -exec strip --strip-unneeded {} + 2>/dev/null || true
+        # 清掉构建期辅助物：uname shim（仅 armv7 用）与 configure 日志不该留在最终镜像里
+        rm -rf /tmp/uname-shim /tmp/cmake.log
         rm -rf /tmp/opencv-build "/tmp/opencv-$OPENCV_VERSION" /tmp/opencv.tar.gz
         install_ddddocr
         # .build_deps 内含 git/cmake/编译器/头文件等构建期工具，构建结束全部卸载（file/magic.mgc 未安装，bash 保留）
