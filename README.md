@@ -115,7 +115,12 @@ armv7 `py3-onnxruntime` 包本身就是 NEON 版本（`readelf -A` 可见
 须在能原生执行 AArch32 的机器上运行（QEMU 下墙钟由指令翻译主导，数字无意义）；
 脚本只输出数字、不做断言。
 
-## **CI 架构：构建 / 测试 / 发布三阶段解耦**
+---
+
+<details>
+<summary><b>CI 架构（维护者向）</b>：构建 / 测试 / 发布三阶段解耦</summary>
+
+### **流水线**
 
 ```
 plan    计算架构分组（按 dispatch 的 platforms 输入裁剪）
@@ -130,17 +135,17 @@ plan    计算架构分组（按 dispatch 的 platforms 输入裁剪）
   publish  各架构组按 digest 合并成正式 tag → 校验 manifest 平台完整性
 ```
 
-**三条设计原则**：
+### **设计原则**
 
 1. **发布即全绿**：`publish` 需要所有构建 + 所有冒烟 job 成功。任何测试失败都不会产生 tag
 2. **零重复编译**：构建阶段把层缓存写入 GHA cache（按架构组隔离 scope），冒烟与发布阶段
    `cache-from` 命中同一份缓存，只做导出、不重新编译。同一 commit 的「验证构建 → 冒烟 → 发布」
    三次跑都复用同一份产物
 3. **不产临时 tag**：发布模式下各架构组用 `push-by-digest` 推到 ghcr（无 tag），`publish`
-   用 `imagetools create` 把各组 digest 合并成正式多架构 tag。因此不会在 Hub 上留下
-   `staging-*` 之类的一次性 tag
+   用 `imagetools create` 把各组 digest 合并成正式多架构 tag，因此不会在 tag 列表里留下
+   可被拉取的一次性中间产物
 
-**workflow_dispatch 输入**：
+### **workflow_dispatch 输入**
 
 | 输入 | 默认 | 说明 |
 |---|---|---|
@@ -149,7 +154,7 @@ plan    计算架构分组（按 dispatch 的 platforms 输入裁剪）
 | `native_arm` | true | 用 `ubuntu-24.04-arm` 原生构建 arm64（比 QEMU 快 3-5 倍）；该 runner 不可用时取消勾选回退 QEMU |
 | `allow_partial_publish` | false | 逃生阀：允许用平台子集发布 |
 
-**测试防线（两层，都在构建之外）**：
+### **测试防线（两层，都在构建之外）**
 
 - **per-arch 冒烟矩阵（9 个 job，每平台一个）**：用构建阶段的层缓存重建单平台镜像
   （命中缓存 = 秒级，不重新编译），再在该架构上真跑 `tests/smoke.py`，模式由平台类型显式传入：
@@ -168,9 +173,11 @@ plan    计算架构分组（按 dispatch 的 platforms 输入裁剪）
 > `pyconfig.h` 存活）。**推理不在构建期跑**——那会把测试塞进构建、混淆「构建失败」与
 > 「运行时失败」两种信号，也让产物在已知运行时损坏时无法单独构建出来调试。
 
-**其他**：
+### **其他**
 
 - loong64 使用独立 Dockerfile（`Dockerfile.loong64`，仅基础镜像不同）构建并合并进主 tag 的多架构 manifest；CI 含 Dockerfile 同步校验，防止两个文件演化漂移
 - 勾选 `push` 或推送版本 tag（如 `1.6.1`）时才真正发布到 ghcr.io 与 Docker Hub；tag 发布始终为全平台构建
 - tag 发布使用 `ddddocr.version` 锁定的上游 commit（可复现）；dispatch 默认跟随上游 master
 - 默认分支 main 的普通推送不触发构建，只同步 Docker Hub 描述
+
+</details>
