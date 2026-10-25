@@ -1,4 +1,4 @@
-# ddddocr
+# ddddocr Docker 镜像（Alpine）
 
 基于 Alpine 的 [ddddocr](https://github.com/sml2h3/ddddocr) 运行环境：ddddocr 与它依赖的
 OpenCV、onnxruntime 一并预编译，容器内 `import ddddocr` 即可使用，不需要在目标机器上准备
