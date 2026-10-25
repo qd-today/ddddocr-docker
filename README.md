@@ -50,17 +50,17 @@ boxes = det.detection(image_bytes)            # 目标检测
 
 ## 支持的平台
 
-| 平台 | OCR 能力 | 镜像体积 |
-|---|---|---|
-| linux/amd64 | ✓ | ~465 MB |
-| linux/arm64 | ✓ | ~465 MB |
-| linux/arm/v7 | ✓ | ~465 MB |
-| linux/ppc64le | ✓ | ~465 MB |
-| linux/riscv64 | ✓ | ~465 MB |
-| linux/loong64 | ✓ | ~465 MB |
-| linux/386、linux/arm/v6、linux/s390x | ✗ | ~50 MB |
+| 平台 | OCR 能力 |
+|---|---|
+| linux/amd64 | ✓ |
+| linux/arm64 | ✓ |
+| linux/arm/v7 | ✓ |
+| linux/ppc64le | ✓ |
+| linux/riscv64 | ✓ |
+| linux/loong64 | ✓ |
+| linux/386、linux/arm/v6、linux/s390x | ✗ |
 
-体积为未压缩值，所有具备 OCR 能力的平台一致。
+各平台体积见下节。
 
 ### 不提供 OCR 的三个平台
 
@@ -91,46 +91,24 @@ minirootfs 的方案。loong64 由独立 Dockerfile 构建后合并进主 tag �
 
 ## 镜像体积
 
-同一个镜像有三个常用口径，数值差很多，不能混用（以下均为 arm64）：
+| 场景 | 大约 |
+|---|---|
+| 首次拉取 | 150 MB（本地已有相同基础层时更少） |
+| 占用磁盘 | 300–450 MB（取决于 Docker 版本） |
+| 运行容器 | 额外不到 1 MB |
 
-| 口径 | 数值 | 来源与含义 |
-|---|---|---|
-| 下载量（压缩） | 146 MiB | registry manifest 的压缩层之和；决定拉取耗时与 registry 存储 |
-| 解压后文件 | 约 297 MiB | `du -sh /`，与 `docker history` 各层 SIZE 之和一致 |
-| `docker images` 的 SIZE | 443 MiB（465 MB） | containerd 镜像存储下的磁盘占用 = 解压层 + 保留的压缩副本 |
+体积构成：
 
-第三项约等于前两项之和（297 + 146 ≈ 443）：registry 上每一层都是一个 gzip 压缩的 tar
-（manifest 里记录它的 sha256 与字节数）。containerd 镜像存储会把这个原始 blob 按 digest
-原样留在本地（供 `docker save`、再推送与校验），同时再解压一份快照给容器运行，因此占两份。
-老式的 overlay2 镜像存储不保留 blob，那种环境只占解压后的约 297 MiB。
+| 内容 | 大小 |
+|---|---|
+| ddddocr 内置模型 | 86 MB |
+| numpy（含 OpenBLAS） | 33 MB |
+| onnxruntime（Python 绑定 + 库） | 39 MB |
+| OpenCV（自编最小化） | 8.6 MB |
+| Alpine、Python 3.14、busybox 等运行时 | 其余 |
 
-在一台干净机器上拉取并运行（arm64）：
-
-| 动作 | 网络流量 | 新增磁盘 |
-|---|---|---|
-| `docker pull` | 146 MiB | containerd 存储约 465 MB（解压快照 + 压缩 blob）；overlay2 存储约 297 MiB |
-| `docker run` | 0 | 约 200 kB 的可写层，随容器写入增长 |
-
-只会落盘你拉取的那个架构。`docker images` 会把本机已缓存的其它架构一起计入 SIZE
-（本机显示 1.58 GB 是 5 个平台之和），看单架构请用 `docker images --tree`。
-
-镜像只有一个 `RUN` 层：构建期依赖（git、编译工具链等）在同一层内安装并在末尾删除，
-所以解压后的文件里不含编译工具链，也没有可回收的残留层。
-
-容器内主要占用（arm64）：
-
-| 路径 | 大小 | 内容 |
-|---|---|---|
-| `site-packages/ddddocr` | 86 MB | 内置的检测与识别模型 |
-| `site-packages/numpy` | 33 MB | |
-| `site-packages/onnxruntime` | 25 MB | Python 绑定 |
-| `/usr/lib/libonnxruntime.so.1.24.4` | 14 MB | 推理引擎本体 |
-| `/usr/lib/libopenblas*` | 10 MB | numpy 的 BLAS 后端 |
-| `libopencv_core` + `libopencv_imgproc` | 8.6 MB | 自编的最小化 OpenCV |
-| `/usr/bin` | 19 MB | python3、busybox 等 |
-
-无 OCR 的三个平台下载量约 23–25 MB（armv6 23 MB，386 / s390x 25 MB），内容只有 python3
-与 libprotobuf-lite。
+多架构镜像只下载你所在架构的那一份；无 OCR 的三个平台约 25 MB，只有 python3 与
+libprotobuf-lite。
 
 ## 标签
 
@@ -148,7 +126,7 @@ workflow_dispatch（勾选 push）。
 
 - **OpenCV 源码编译**：apk 的 `py3-opencv` 会带入 Qt / OpenGL / FFmpeg 依赖链（约 236 MB），
   ddddocr 用不到；PyPI 也没有 musllinux wheel，因此改为自编最小化版本。
-- **镜像精简**（约 50 MB，不影响功能）：不安装 file 的 magic.mgc 特征库；git 归入构建期
+- **镜像精简**（去掉约 50 MB 无用内容，不影响功能）：不安装 file 的 magic.mgc 特征库；git 归入构建期
   临时依赖，用完即卸；删除 OpenCV 的 haarcascades / lbpcascades 与 `/usr/include/opencv4`
   头文件（`/usr/include` 的其余内容必须保留——Alpine 3.24 起 `pyconfig.h` 由 python3 包提供，
   是上层镜像编译 C 扩展的前提）；清理 sympy / mpmath 元数据残留与 numpy 测试套件。
