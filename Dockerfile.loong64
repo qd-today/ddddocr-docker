@@ -74,17 +74,21 @@ case "${TARGETPLATFORM}" in
         # 分支：用 aarch64 的检查文件喂 arm32 编译器（NEON 测试 Failed），并按 AArch64 配置
         # NEON_DOTPROD/NEON_BF16 等无效 dispatch。构建能过、冒烟也过，配置却是错的。
         # 所以下面显式指定处理器，并在 configure 后用断言盯住探测结果。
-        # armv7 额外给 cmake 一个"说真话的 uname"：容器由内核 compat 模式直接执行时
-        # uname -m 报的是宿主 aarch64，而 cmake 会用它覆盖 -DCMAKE_SYSTEM_PROCESSOR。
-        # 试过用 -DCMAKE_SYSTEM_NAME=Linux 进交叉编译模式，能被尊重，但交叉模式会
-        # 跳过 OpenCV 的 python3 绑定（实测最终镜像里 import cv2 直接 ModuleNotFoundError），
-        # 所以改成在原位修正 uname，保持原生编译路径不变。
+        # armv7 的架构探测修正。四种方案实测对比（都记录在这里，避免以后重复踩）：
+        #  1) -DCMAKE_SYSTEM_PROCESSOR=arm          -> 被 cmake 在 project() 里用 uname 覆盖，无效
+        #  2) + -DCMAKE_SYSTEM_NAME=Linux（交叉模式）-> 探测正确，但跳过 OpenCV 的 python3 绑定，
+        #     最终镜像 import cv2 直接 ModuleNotFoundError
+        #  3) setarch linux32                       -> arm64 内核不支持 PER_LINUX32（EINVAL），
+        #     这条路只有 x86_64 上的 setarch i386 可行（内核实现了 uname 覆盖）
+        #  4) 给 cmake 指定一个"说真话的 uname"      -> 有效，且保持原生编译路径
+        # 采用 4)，并用 -DCMAKE_UNAME 显式指定，仅影响这一次 configure，
+        # 不像改 PATH 那样波及后续的 apk/pip/python 断言。
+        cmake_uname=""
         if [ "$TARGETARCH" = "arm" ]; then
             mkdir -p /tmp/uname-shim
             printf '#!/bin/sh\n[ "$1" = "-m" ] && { echo armv7l; exit 0; }\nexec /bin/busybox uname "$@"\n' > /tmp/uname-shim/uname
             chmod +x /tmp/uname-shim/uname
-            PATH="/tmp/uname-shim:$PATH"
-            export PATH
+            cmake_uname="-DCMAKE_UNAME=/tmp/uname-shim/uname"
         fi
         case "${TARGETARCH}" in
             amd64)   cmake_proc=x86_64 ;;
@@ -99,7 +103,7 @@ case "${TARGETPLATFORM}" in
         cmake -S "/tmp/opencv-$OPENCV_VERSION" -B /tmp/opencv-build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr \
-            -DCMAKE_SYSTEM_PROCESSOR="${cmake_proc}" \
+            -DCMAKE_SYSTEM_PROCESSOR="${cmake_proc}" ${cmake_uname} \
             -DBUILD_LIST=core,imgproc,imgcodecs,python3 \
             -DBUILD_SHARED_LIBS=ON \
             -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF \
