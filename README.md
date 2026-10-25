@@ -43,13 +43,20 @@ docker pull a76yyyy/ddddocr:latest
 
 > ### ⚠️ 386 / armv6 / s390x 是「空壳镜像」，不能用于验证码识别
 >
-> 这三个平台的上游依赖链缺失（`onnxruntime` 不提供 i386 / s390x wheel，armv6 无可用
-> onnxruntime 构建），镜像里**只有 python3 + libprotobuf-lite，没有 OpenCV，也没有
-> ddddocr 包本身**：
+> 镜像里**只有 python3 + libprotobuf-lite，没有 OpenCV，也没有 ddddocr 包本身**：
 >
 > - `import ddddocr` 直接 `ModuleNotFoundError`
 > - 任何依赖 OCR 的功能（qd 的验证码识别任务）在这些平台上**必然失败**
 > - `docker pull a76yyyy/ddddocr:latest` 在这些架构上会「成功」，但拉到的就是空壳
+>
+> 三个平台的原因各不相同（均已用 `apk policy` 实测 + 对照 Alpine aports 的
+> `community/onnxruntime/APKBUILD` 确认）：
+>
+> | 平台 | Alpine 架构名 | `onnxruntime` C 库 | `py3-onnxruntime` | 根因 |
+> |---|---|---|---|---|
+> | linux/386 | `x86` | ✗ 不存在 | ✗ 不存在 | APKBUILD 写着 `arch="all !s390x !x86"`，注释「s390x, x86: build fails」 |
+> | linux/s390x | `s390x` | ✗ 不存在 | ✗ 不存在 | 同上 |
+> | linux/arm/v6 | `armhf` | ✓ 1.24.4-r1 | ✗ 不存在 | APKBUILD 里 `armhf) ;; # blocked by py3-flattbuffers`——只有 python 绑定被阻塞，C 库是有的 |
 >
 > 保留这三个平台的唯一原因：让 `latest` 多架构 manifest 覆盖完整，使上层镜像
 > （pycurl-docker 等 `FROM a76yyyy/ddddocr:latest`）在这些架构上仍能正常构建
@@ -64,6 +71,42 @@ docker pull a76yyyy/ddddocr:latest
 - 编译产物经 `strip --strip-unneeded` 剥离符号，各 OCR 平台镜像约 465MB
 - 体积优化（约 50MB 死重清理，不影响任何功能）：不安装 file/magic.mgc 特征库、git 归入 .build_deps 用完即卸、删除 OpenCV haarcascades/lbpcascades 级联数据与 `/usr/include/opencv4` 头文件（注意保留 `/usr/include` 其余内容——Alpine 3.24 起 `pyconfig.h` 由 python3 包拥有，是下游镜像编译 C 扩展的前提）、清 sympy/mpmath 元数据残留与 numpy 测试套件
 - 本地构建加速：`docker build --build-arg APK_MIRROR=https://mirrors.tuna.tsinghua.edu.cn .`
+
+### **armv7 的 NEON：不用自编 onnxruntime**
+
+`--build-arg OPENCV_CPU_BASELINE=NEON` 只影响**我们自己编译的 OpenCV**。onnxruntime
+不需要（也不值得）为 NEON 自编，因为 Alpine 官方的 armv7 包**已经是 NEON 版本**：
+
+```
+$ readelf -A usr/lib/libonnxruntime.so.1.24.4
+  Tag_CPU_arch: v7
+  Tag_Advanced_SIMD_arch: NEONv1      ← 已声明 NEON
+  Tag_ABI_VFP_args: VFP registers
+$ objdump -d ... | grep -cE '\sv(mla|add|ld1|mov|mul|st1)\.'
+42483                                  ← 4.2 万条 NEON 指令
+```
+
+原因是 onnxruntime 上游的 `cmake/onnxruntime_mlas.cmake` 对 `CMAKE_SYSTEM_PROCESSOR
+MATCHES "^arm.*"` 的分支会**强制**追加 `-mfpu=neon` 并编入 `aarch32/QgemmU8X8KernelNeon.S`
+等 NEON 内核，与发行版 CFLAGS 无关。
+
+实测（armv7 在 arm64 runner 上原生 AArch32，`tests/bench.py`，iters=30 取中位数）：
+
+| 项目 | 默认（OpenCV 标量） | `OPENCV_CPU_BASELINE=NEON` | 加速比 |
+|---|---|---|---|
+| cvtColor BGR2GRAY | 0.50 ms | 0.27 ms | 1.85× |
+| GaussianBlur 5×5 | 2.05 ms | 1.46 ms | 1.40× |
+| threshold | 0.18 ms | 0.09 ms | 2.00× |
+| classification（onnxruntime） | 28.67 ms | 28.56 ms | 1.00× |
+| detection（onnxruntime） | 108.59 ms | 108.59 ms | 1.00× |
+| **端到端** | 28.91 ms | 28.95 ms | **1.00×** |
+
+OpenCV 处理合计 −29%，但因为推理占端到端 90%+ 且推理本就已是 NEON，**端到端零收益**；
+代价是构建时间 4m16s → 17min（NEON 基线要把所有向量化分支实例化编译），且开了 NEON 的
+`arm/v7` 镜像无法在 armv6-only 的 CPU 上运行。因此**不作默认**，仅作为可选参数保留。
+
+复现基准：`docker run --rm -i --platform linux/arm/v7 <image> python3 - < tests/bench.py`
+（必须在能原生执行 AArch32 的机器上跑；QEMU 下墙钟由指令翻译主导，数字无意义）。
 
 ## **CI 架构：构建 / 测试 / 发布三阶段解耦**
 
