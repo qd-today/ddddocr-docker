@@ -89,6 +89,32 @@ Docker Hub 的官方 alpine 镜像没有 loong64 变体，因此 loong64 使用�
 minirootfs 的方案。loong64 由独立 Dockerfile 构建后合并进主 tag 的 manifest，同时保留
 `latest-loong64` 这类后缀 tag 可直接拉取。
 
+## 镜像体积
+
+| 指标 | 大小 |
+|---|---|
+| 下载量（压缩后） | amd64 157 MB / arm64 146 MB / armv7 135 MB |
+| 本地磁盘占用（未压缩，arm64） | 443 MB |
+| 容器内实际文件（arm64，`du -sh /`） | 297 MB |
+
+未压缩体积比容器内文件大 146 MB：构建期依赖（git、编译工具链等）在后一层被 `apk del`
+删除，而删除只写 whiteout，底层数据仍留在镜像里。这是单阶段构建的固有代价。
+
+容器内主要占用（arm64）：
+
+| 路径 | 大小 | 内容 |
+|---|---|---|
+| `site-packages/ddddocr` | 86 MB | 内置的检测与识别模型 |
+| `site-packages/numpy` | 33 MB | |
+| `site-packages/onnxruntime` | 25 MB | Python 绑定 |
+| `/usr/lib/libonnxruntime.so.1.24.4` | 14 MB | 推理引擎本体 |
+| `/usr/lib/libopenblas*` | 10 MB | numpy 的 BLAS 后端 |
+| `libopencv_core` + `libopencv_imgproc` | 8.6 MB | 自编的最小化 OpenCV |
+| `/usr/bin` | 19 MB | python3、busybox 等 |
+
+无 OCR 的三个平台下载量约 23–25 MB（armv6 23 MB，386 / s390x 25 MB），内容只有 python3
+与 libprotobuf-lite。
+
 ## 标签
 
 | 标签 | 含义 |
