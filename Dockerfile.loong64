@@ -18,6 +18,11 @@ ARG DDDDOCR_VERSION=master
 # ENV DDDDOCR_VERSION=${DDDDOCR_VERSION}
 # OpenCV 源码版本：自编译最小化构建（core/imgproc/imgcodecs），替代体积臃肿的 apk py3-opencv
 ARG OPENCV_VERSION=4.14.0
+# OpenCV 的 CPU 基线优化开关（opt-in，留空 = OpenCV 默认行为）。
+# 仅 armv7 有意义：ARM32 上 NEON 是可选扩展，OpenCV 默认不启用（Baseline 为空）。
+# 例：--build-arg OPENCV_CPU_BASELINE=NEON
+# 注意：开了 NEON 的 arm/v7 镜像无法在 armv6-only 的 CPU 上运行，故不作默认。
+ARG OPENCV_CPU_BASELINE=""
 
 # Install packages
 RUN <<EOT
@@ -83,6 +88,10 @@ case "${TARGETPLATFORM}" in
         #  4) 给 cmake 指定一个"说真话的 uname"      -> 有效，且保持原生编译路径
         # 采用 4)，并用 -DCMAKE_UNAME 显式指定，仅影响这一次 configure，
         # 不像改 PATH 那样波及后续的 apk/pip/python 断言。
+        cmake_baseline=""
+        if [ -n "${OPENCV_CPU_BASELINE}" ]; then
+            cmake_baseline="-DCPU_BASELINE=${OPENCV_CPU_BASELINE}"
+        fi
         cmake_uname=""
         if [ "$TARGETARCH" = "arm" ]; then
             mkdir -p /tmp/uname-shim
@@ -103,7 +112,7 @@ case "${TARGETPLATFORM}" in
         cmake -S "/tmp/opencv-$OPENCV_VERSION" -B /tmp/opencv-build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr \
-            -DCMAKE_SYSTEM_PROCESSOR="${cmake_proc}" ${cmake_uname} \
+            -DCMAKE_SYSTEM_PROCESSOR="${cmake_proc}" ${cmake_uname} ${cmake_baseline} \
             -DBUILD_LIST=core,imgproc,imgcodecs,python3 \
             -DBUILD_SHARED_LIBS=ON \
             -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF \

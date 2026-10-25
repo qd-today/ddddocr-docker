@@ -1,0 +1,118 @@
+name: Bench NEON (armv7)
+
+# 量化「OpenCV 是否启用 NEON」在 armv7 上的性能差异。
+# 只在 workflow_dispatch 触发，不参与发布链路。
+#
+# 为什么跑在 ubuntu-24.04-arm 而不是 x64：arm64 宿主上 armv7 容器由内核 compat
+# 模式原生执行（AArch32 模式），墙钟时间才有意义；在 x64 runner 或 QEMU 下测出来
+# 的数字被指令翻译主导，无法反映真实差异。构建同样在这里原生完成，无需 QEMU。
+on:
+  workflow_dispatch:
+    inputs:
+      iters:
+        description: '每项测试的迭代次数'
+        type: string
+        default: '30'
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04-arm
+    name: armv7 scalar vs NEON
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build scalar (OpenCV 默认基线)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm/v7
+          load: true
+          push: false
+          tags: ddddocr-bench:scalar
+          provenance: false
+
+      - name: Build NEON (OPENCV_CPU_BASELINE=NEON)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm/v7
+          load: true
+          push: false
+          tags: ddddocr-bench:neon
+          provenance: false
+          build-args: |
+            OPENCV_CPU_BASELINE=NEON
+
+      # 先确认执行方式：期望 uname 报 aarch64（内核 compat 原生执行）。
+      # 若变成 armv7l，说明走了 QEMU，本 job 的结果不可信，直接失败。
+      - name: Verify native AArch32 execution
+        run: |
+          OUT=$(docker run --rm --platform linux/arm/v7 alpine:3.24 uname -m)
+          echo "uname -m 在 armv7 容器内 = $OUT"
+          if [ "$OUT" = "armv7l" ]; then
+            echo "::error::检测到 QEMU（uname 被改写为 armv7l），基准结果不可信"
+            exit 1
+          fi
+
+      - name: Run benchmark - scalar
+        env:
+          BENCH_ITERS: ${{ github.event.inputs.iters }}
+        run: |
+          docker run --rm -i -e BENCH_ITERS --platform linux/arm/v7 \
+            ddddocr-bench:scalar python3 - < tests/bench.py | tee /tmp/scalar.txt
+
+      - name: Run benchmark - NEON
+        env:
+          BENCH_ITERS: ${{ github.event.inputs.iters }}
+        run: |
+          docker run --rm -i -e BENCH_ITERS --platform linux/arm/v7 \
+            ddddocr-bench:neon python3 - < tests/bench.py | tee /tmp/neon.txt
+
+      - name: Compare
+        run: |
+          python3 - <<'PY'
+          import re, sys
+
+          LINE = re.compile(r"^(?P<label>.{30})\s+(?P<ms>\d+\.\d+) ms")
+
+          def parse(path):
+              info, data = [], {}
+              for line in open(path, encoding="utf-8"):
+                  line = line.rstrip()
+                  if "Baseline:" in line or line.startswith("python ") or line.startswith("OpenCV "):
+                      info.append(line)
+                  m = LINE.match(line)
+                  if m:
+                      data[m.group("label").strip()] = float(m.group("ms"))
+              return info, data
+
+          s_info, s = parse("/tmp/scalar.txt")
+          n_info, n = parse("/tmp/neon.txt")
+
+          print("=== 构建差异确认 ===")
+          for a, b in zip(s_info, n_info):
+              print(("  scalar: %s" % a) if a == b else
+                    ("  scalar: %s\n  neon  : %s   <-- 有差异" % (a, b)))
+
+          sb = next((x for x in s_info if "Baseline:" in x), "")
+          nb = next((x for x in n_info if "Baseline:" in x), "")
+          if "NEON" not in nb:
+              sys.exit("::error::NEON 版本未启用 NEON 基线，基准无效（%s）" % nb)
+
+          print()
+          print("%-32s %10s %10s %8s" % ("项目", "scalar/ms", "neon/ms", "加速比"))
+          print("-" * 64)
+          for label in s:
+              if label not in n:
+                  continue
+              ratio = s[label] / n[label] if n[label] else float("inf")
+              print("%-32s %10.2f %10.2f %7.2fx" % (label, s[label], n[label], ratio))
+          PY
