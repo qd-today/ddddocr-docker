@@ -74,7 +74,7 @@ FROM a76yyyy/ddddocr:latest
 > |---|---|---|---|---|
 > | linux/386 | `x86` | ✗ | ✗ | 上游在 x86 上编译失败，APKBUILD 标注 `arch="all !s390x !x86"` |
 > | linux/s390x | `s390x` | ✗ | ✗ | 同上 |
-> | linux/arm/v6 | `armhf` | ✓ | ✗ | python 绑定被 `py3-flattbuffers` 阻塞（APKBUILD: `armhf) ;; # blocked by py3-flattbuffers`），C 库本身可用 |
+> | linux/arm/v6 | `armhf` | ✓ | ✗ | `flatbuffers` 在 armhf 被整体排除（`arch="all !armhf"`，注释「armhf: blocked by bus error in tests」），`py3-flatbuffers` 因此缺失，onnxruntime 的 py3 子包被禁用；C 库本身可用 |
 >
 > 保留这三个平台的唯一原因：让 `latest` 多架构 manifest 覆盖完整，使上层镜像
 > （pycurl-docker 等 `FROM a76yyyy/ddddocr:latest`）在这些架构上仍能正常构建
@@ -98,12 +98,18 @@ OpenCV 自行决定（ARM32 上 OpenCV 不设基线，走纯标量路径）。�
 
 不设默认的原因：
 
-- **收益被推理占比稀释**：ARM32 开 NEON 后预处理单步快 1.4–2.0×（cvtColor 1.85×、
-  GaussianBlur 1.40×、threshold 2.00×），但 OpenCV 只占端到端约 11%，其余是 onnxruntime
-  推理，端到端差异在噪声范围内
-- **兼容性**：Alpine 的 armhf 用户态以 armv6 为基线，开了 NEON 的 `arm/v7` 镜像无法在
-  armv6-only 的 CPU 上运行
+- **收益到不了端到端**：ARM32 开 NEON 后预处理单步快 1.4–2.0×（cvtColor 1.85×、
+  GaussianBlur 1.40×、threshold 2.00×，合计 3.59 → 2.54 ms），但验证码图片只有 120×40
+  量级，`imdecode + resize + gray` 合计不到 1 ms，且 OCR 绝大部分时间在 onnxruntime
+  推理上——而它本身已经是 NEON 版。大图的预处理才看得出差别
+- **兼容性**：OpenCV 以 NEON 为基线后，`import cv2` 及任何 OpenCV 调用在无 NEON 的 ARMv7
+  （如 Marvell Armada 370/XP、部分 Cortex-A5）上会 SIGILL。本镜像同时被上层当作**不含 OCR
+  的 Python 基座**（pycurl 等），这类用法不需要 NEON，保持标量可继续兼容这部分硬件
 - **构建成本**：约 4 倍（NEON 基线会把所有向量化分支实例化编译）
+
+需要说明的是：**只用来做 OCR 时，armv7 本来就要求 NEON**——Alpine 的 armv7 onnxruntime
+是 NEON 构建（见下），而 onnxruntime 的 MLAS 只在 ARM64 上做运行时特性检测，ARM32 没有
+回退路径。上面「兼容性」一条针对的是把本镜像当纯 Python 基座使用的场景。
 
 **onnxruntime 不需要为 NEON 自编**：其上游 `cmake/onnxruntime_mlas.cmake` 在
 `CMAKE_SYSTEM_PROCESSOR` 匹配 `^arm.*` 时无条件追加 `-mfpu=neon`，并编入
