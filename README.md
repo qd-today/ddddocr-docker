@@ -49,14 +49,13 @@ docker pull a76yyyy/ddddocr:latest
 > - 任何依赖 OCR 的功能（qd 的验证码识别任务）在这些平台上**必然失败**
 > - `docker pull a76yyyy/ddddocr:latest` 在这些架构上会「成功」，但拉到的就是空壳
 >
-> 三个平台的原因各不相同（均已用 `apk policy` 实测 + 对照 Alpine aports 的
-> `community/onnxruntime/APKBUILD` 确认）：
+> 三个平台的缺失环节不同：
 >
-> | 平台 | Alpine 架构名 | `onnxruntime` C 库 | `py3-onnxruntime` | 根因 |
+> | 平台 | Alpine 架构名 | `onnxruntime` C 库 | `py3-onnxruntime` | 原因 |
 > |---|---|---|---|---|
-> | linux/386 | `x86` | ✗ 不存在 | ✗ 不存在 | APKBUILD 写着 `arch="all !s390x !x86"`，注释「s390x, x86: build fails」 |
-> | linux/s390x | `s390x` | ✗ 不存在 | ✗ 不存在 | 同上 |
-> | linux/arm/v6 | `armhf` | ✓ 1.24.4-r1 | ✗ 不存在 | APKBUILD 里 `armhf) ;; # blocked by py3-flattbuffers`——只有 python 绑定被阻塞，C 库是有的 |
+> | linux/386 | `x86` | ✗ | ✗ | 上游在 x86 上编译失败，APKBUILD 标注 `arch="all !s390x !x86"` |
+> | linux/s390x | `s390x` | ✗ | ✗ | 同上 |
+> | linux/arm/v6 | `armhf` | ✓ | ✗ | python 绑定被 `py3-flattbuffers` 阻塞（APKBUILD: `armhf) ;; # blocked by py3-flattbuffers`），C 库本身可用 |
 >
 > 保留这三个平台的唯一原因：让 `latest` 多架构 manifest 覆盖完整，使上层镜像
 > （pycurl-docker 等 `FROM a76yyyy/ddddocr:latest`）在这些架构上仍能正常构建
@@ -72,41 +71,30 @@ docker pull a76yyyy/ddddocr:latest
 - 体积优化（约 50MB 死重清理，不影响任何功能）：不安装 file/magic.mgc 特征库、git 归入 .build_deps 用完即卸、删除 OpenCV haarcascades/lbpcascades 级联数据与 `/usr/include/opencv4` 头文件（注意保留 `/usr/include` 其余内容——Alpine 3.24 起 `pyconfig.h` 由 python3 包拥有，是下游镜像编译 C 扩展的前提）、清 sympy/mpmath 元数据残留与 numpy 测试套件
 - 本地构建加速：`docker build --build-arg APK_MIRROR=https://mirrors.tuna.tsinghua.edu.cn .`
 
-### **armv7 的 NEON：不用自编 onnxruntime**
+### **CPU 基线优化（`OPENCV_CPU_BASELINE`）**
 
-`--build-arg OPENCV_CPU_BASELINE=NEON` 只影响**我们自己编译的 OpenCV**。onnxruntime
-不需要（也不值得）为 NEON 自编，因为 Alpine 官方的 armv7 包**已经是 NEON 版本**：
+`--build-arg OPENCV_CPU_BASELINE=NEON` 只作用于本仓库自编的 OpenCV；默认留空，即交由
+OpenCV 自行决定（ARM32 上 OpenCV 不设基线，走纯标量路径）。该参数只在 ARM32 上有意义——
+其余架构 OpenCV 会自己检测并启用 SSE2/NEON 等基线。
 
-```
-$ readelf -A usr/lib/libonnxruntime.so.1.24.4
-  Tag_CPU_arch: v7
-  Tag_Advanced_SIMD_arch: NEONv1      ← 已声明 NEON
-  Tag_ABI_VFP_args: VFP registers
-$ objdump -d ... | grep -cE '\sv(mla|add|ld1|mov|mul|st1)\.'
-42483                                  ← 4.2 万条 NEON 指令
-```
+不设默认的原因：
 
-原因是 onnxruntime 上游的 `cmake/onnxruntime_mlas.cmake` 对 `CMAKE_SYSTEM_PROCESSOR
-MATCHES "^arm.*"` 的分支会**强制**追加 `-mfpu=neon` 并编入 `aarch32/QgemmU8X8KernelNeon.S`
-等 NEON 内核，与发行版 CFLAGS 无关。
+- **收益被推理占比稀释**：ARM32 开 NEON 后预处理单步快 1.4–2.0×（cvtColor 1.85×、
+  GaussianBlur 1.40×、threshold 2.00×），但 OpenCV 只占端到端约 11%，其余是 onnxruntime
+  推理，端到端差异在噪声范围内
+- **兼容性**：Alpine 的 armhf 用户态以 armv6 为基线，开了 NEON 的 `arm/v7` 镜像无法在
+  armv6-only 的 CPU 上运行
+- **构建成本**：约 4 倍（NEON 基线会把所有向量化分支实例化编译）
 
-实测（armv7 在 arm64 runner 上原生 AArch32，`tests/bench.py`，iters=30 取中位数）：
+**onnxruntime 不需要为 NEON 自编**：其上游 `cmake/onnxruntime_mlas.cmake` 在
+`CMAKE_SYSTEM_PROCESSOR` 匹配 `^arm.*` 时无条件追加 `-mfpu=neon`，并编入
+`aarch32/QgemmU8X8KernelNeon.S` 等 NEON 内核，与发行版 CFLAGS 无关。因此 Alpine 的
+armv7 `py3-onnxruntime` 包本身就是 NEON 版本（`readelf -A` 可见
+`Tag_Advanced_SIMD_arch: NEONv1`），自编不会带来额外收益。
 
-| 项目 | 默认（OpenCV 标量） | `OPENCV_CPU_BASELINE=NEON` | 加速比 |
-|---|---|---|---|
-| cvtColor BGR2GRAY | 0.50 ms | 0.27 ms | 1.85× |
-| GaussianBlur 5×5 | 2.05 ms | 1.46 ms | 1.40× |
-| threshold | 0.18 ms | 0.09 ms | 2.00× |
-| classification（onnxruntime） | 28.67 ms | 28.56 ms | 1.00× |
-| detection（onnxruntime） | 108.59 ms | 108.59 ms | 1.00× |
-| **端到端** | 28.91 ms | 28.95 ms | **1.00×** |
-
-OpenCV 处理合计 −29%，但因为推理占端到端 90%+ 且推理本就已是 NEON，**端到端零收益**；
-代价是构建时间 4m16s → 17min（NEON 基线要把所有向量化分支实例化编译），且开了 NEON 的
-`arm/v7` 镜像无法在 armv6-only 的 CPU 上运行。因此**不作默认**，仅作为可选参数保留。
-
-复现基准：`docker run --rm -i --platform linux/arm/v7 <image> python3 - < tests/bench.py`
-（必须在能原生执行 AArch32 的机器上跑；QEMU 下墙钟由指令翻译主导，数字无意义）。
+基准可用 `tests/bench.py` 复现：`docker run --rm -i --platform linux/arm/v7 <image> python3 - < tests/bench.py`。
+须在能原生执行 AArch32 的机器上运行（QEMU 下墙钟由指令翻译主导，数字无意义）；
+脚本只输出数字、不做断言。
 
 ## **CI 架构：构建 / 测试 / 发布三阶段解耦**
 
@@ -126,7 +114,6 @@ plan    计算架构分组（按 dispatch 的 platforms 输入裁剪）
 **三条设计原则**：
 
 1. **发布即全绿**：`publish` 需要所有构建 + 所有冒烟 job 成功。任何测试失败都不会产生 tag
-   （旧流程是「构建成功就发布」，运行时状态零验证）
 2. **零重复编译**：构建阶段把层缓存写入 GHA cache（按架构组隔离 scope），冒烟与发布阶段
    `cache-from` 命中同一份缓存，只做导出、不重新编译。同一 commit 的「验证构建 → 冒烟 → 发布」
    三次跑都复用同一份产物
@@ -151,11 +138,12 @@ plan    计算架构分组（按 dispatch 的 platforms 输入裁剪）
     ppc64le/riscv64/loong64 的 OpenCV/onnxruntime 都是 QEMU 下源码编译，架构相关的
     ABI/数值问题只有真实前向才会暴露
   - 3 个空壳平台 `-- degraded`：断言 python3 可用、libprotobuf-lite 在位，并**确认
-    `ddddocr`/`cv2`/`onnxruntime` 确实不存在**（与下面「空壳镜像」一节的契约一一对应）
-  - 模式显式传入而不是自动探测：自动探测会在 ddddocr 意外消失时静默降级成空壳检查并通过
+    `ddddocr`/`cv2`/`onnxruntime` 确实不存在**（与上面「空壳镜像」一节的契约一一对应）
+  - 模式由 CI 显式传入、不做自动探测：自动探测会在 ddddocr 意外缺失时静默降级成空壳检查
+    并通过，从而掩盖真实回归
   - 脚本用 stdin 喂进容器（`python3 - <mode>`），不进镜像、不依赖 bind mount、不依赖外部网络
 - **发布后 manifest 断言**：每个正式 tag 的平台集合必须与计划完全一致，不一致直接 fail
-  （1.6.1 那次 `latest` 被单架构覆盖的事故，从此由 CI 自动拦截）
+  （防止正式 tag 被不完整 manifest 覆盖）
 
 > 构建期只保留「产物自洽」的微秒级断言（`import ddddocr, onnxruntime, cv2` 通过 +
 > `pyconfig.h` 存活）。**推理不在构建期跑**——那会把测试塞进构建、混淆「构建失败」与
