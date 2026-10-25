@@ -252,7 +252,7 @@ jobs:
       - name: Run smoke (${{ matrix.kind }})
         run: |
           docker run --rm -i --platform ${{ matrix.platform }} ddddocr-smoke:test \
-            python3 - ${{ matrix.kind }} < tests/smoke.py
+            python3 - ${{ matrix.kind }} ${{ matrix.platform }} < tests/smoke.py
 
   publish:
     needs: [plan, build, smoke]
