@@ -18,6 +18,8 @@
 """
 
 import glob
+import io
+import subprocess
 import struct
 import sys
 
@@ -97,6 +99,46 @@ def check_degraded():
             )
 
 
+def check_pillow():
+    """Pillow 自编译契约：版本、格式矩阵、绝不链 libimagequant。
+
+    自编译 Pillow 的两个目的，靠这三条断言守住：
+      1) 拿到 13.x 的解码器 CVE 修复（Alpine 3.24 只有 12.2.0）
+      2) 不链 libimagequant（GPL-3.0）——Alpine 的 py3-pillow 链了它，会把 GPL 义务
+         带进镜像
+    哪天有人把构建改回 apk 的 py3-pillow，这里会立刻失败。
+    """
+    from PIL import Image, features
+
+    major = int(Image.__version__.split(".")[0])
+    assert major >= 13, "Pillow 版本过低（%s），解码器 CVE 修复需要 13.x" % Image.__version__
+
+    for fmt in ("jpg", "zlib", "webp"):
+        assert features.check(fmt), "Pillow 缺少 %s 支持（验证码常见格式）" % fmt
+
+    assert not features.check("libimagequant"), (
+        "Pillow 链上了 libimagequant（GPL-3.0）：构建期不该装 libimagequant-dev"
+    )
+    # features 之外再从动态依赖确认一遍。注意不能用 strings 扫 .so：
+    # C 扩展里始终带着 HAVE_LIBIMAGEQUANT 这类配置字符串，会误报（踩过）
+    for so in glob.glob("/usr/lib/python3*/site-packages/PIL/_imaging*.so"):
+        deps = subprocess.run(["ldd", so], capture_output=True, text=True).stdout
+        assert "imagequant" not in deps, "%s 动态链接了 libimagequant：\n%s" % (so, deps)
+
+    # CVE 都在解码路径上：格式矩阵正确也要确认真的能往返
+    img = Image.new("RGB", (120, 40), "white")
+    for fmt in ("PNG", "JPEG", "WEBP"):
+        buf = io.BytesIO()
+        img.save(buf, fmt)
+        buf.seek(0)
+        with Image.open(buf) as back:
+            back.load()  # 触发解码
+            assert back.size == (120, 40), "%s 往返尺寸不一致：%s" % (fmt, back.size)
+
+    print("Pillow %s | jpg/zlib/webp 可用 | 无 libimagequant | 编解码往返 OK"
+          % Image.__version__)
+
+
 def check_ocr():
     """完整 OCR 平台：依赖 → 模型加载 → 图像编码 → ONNX 前向 → 解码输出。
 
@@ -145,7 +187,11 @@ def main(argv):
         ]
     check_arch(platform, arch_patterns)
     print("== %s 检查 ==" % mode)
-    check_ocr() if mode == "ocr" else check_degraded()
+    if mode == "ocr":
+        check_pillow()
+        check_ocr()
+    else:
+        check_degraded()
     print("smoke(%s): PASS" % mode)
 
 

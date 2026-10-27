@@ -23,6 +23,13 @@ ARG OPENCV_VERSION=4.14.0
 # 例：--build-arg OPENCV_CPU_BASELINE=NEON
 # 注意：开了 NEON 的 arm/v7 镜像无法在 armv6-only 的 CPU 上运行，故不作默认。
 ARG OPENCV_CPU_BASELINE=""
+# Pillow 源码版本：自编译的理由有两条
+#   1) 安全：Alpine 3.24 只有 py3-pillow 12.2.0，而 JPEG/TIFF/FPX 解码的 5 条堆溢出
+#      要 13.0.0 才修；dependabot 要求的最高 first_patched 也是 13.0.0
+#   2) 许可：Alpine 的 py3-pillow 链了 libimagequant（GPL-3.0），会把这个义务带进镜像；
+#      自编译时 build_deps 里不放 libimagequant-dev，就不会链上（Pillow 本体是 MIT-CMU）
+# 只开验证码实际用得到的格式：jpeg / png(zlib) / webp；不装 tiff/freetype/lcms2
+ARG PILLOW_VERSION=13.0.0
 
 # Install packages
 RUN <<EOT
@@ -65,7 +72,12 @@ case "${TARGETPLATFORM}" in
         # 关闭 Qt/OpenGL/FFmpeg 等 GUI 与视频后端，编译后剥离调试符号
         # 注：ppc64le/riscv64 在 QEMU 下编译耗时显著增加（CI 中约 30-90 分钟），但镜像保持 ~465MB 精简体积；
         # 这两个架构虽有 apk 预编译 opencv，但其 Qt6/X11 依赖链使镜像胀至 ~600-770MB，故不采用
-        $APK_CMD add --update --no-cache py3-pillow py3-onnxruntime py3-numpy libprotobuf-lite
+        # py3-pillow 换成自编译版本（见 PILLOW_VERSION 说明），运行时只保留 Pillow 的
+        # C 扩展动态链接的库；tiff/freetype 不开，故不装。
+        # libwebpmux/libwebpdemux 必须显式列：OpenCV 的 imgcodecs 链接 libwebpmux.so.3，
+        # 之前是靠 py3-pillow 的依赖间接带进来的，去掉它就会 import cv2 失败
+        $APK_CMD add --update --no-cache py3-onnxruntime py3-numpy libprotobuf-lite \
+            libjpeg-turbo libpng libwebp libwebpmux libwebpdemux
         # ddddocr 1.6.1 起为纯 Python 包（pyproject.toml + setuptools 后端），--no-deps 后仅需 pip/setuptools/wheel
         # opencv 编译需要 cmake/编译器/python 头文件/numpy 头文件及图像编解码开发库；git 仅构建期克隆源码用
         $APK_CMD add --update --no-cache --virtual .build_deps py3-pip py3-setuptools py3-wheel \
@@ -145,6 +157,20 @@ case "${TARGETPLATFORM}" in
         # 清掉构建期辅助物：uname shim（仅 armv7 用）与 configure 日志不该留在最终镜像里
         rm -rf /tmp/uname-shim /tmp/cmake.log
         rm -rf /tmp/opencv-build "/tmp/opencv-$OPENCV_VERSION" /tmp/opencv.tar.gz
+        # Pillow 源码构建（--no-binary 强制不用 wheel）。build_deps 里没有 libimagequant-dev，
+        # 所以不会像 Alpine 的 py3-pillow 那样链上 GPL-3 的 libimagequant
+        if [ "x" != "x$PIP_MIRROR" ]; then
+            pip install --index-url "$PIP_MIRROR" --no-cache-dir --no-binary pillow --compile \
+                --break-system-packages "pillow==${PILLOW_VERSION}"
+        else
+            pip install --no-cache-dir --no-binary pillow --compile \
+                --break-system-packages "pillow==${PILLOW_VERSION}"
+        fi
+        # 构建期断言：不能链 libimagequant（GPL-3 义务的判定依据）。
+        # 只能用 features/ldd 判定：C 扩展里始终带着 HAVE_LIBIMAGEQUANT 这类配置字符串，
+        # 用 strings 判会误报（踩过）
+        python3 -c "from PIL import features; assert not features.check('libimagequant'), 'Pillow 链了 libimagequant'"
+        ! ldd /usr/lib/python3.*/site-packages/PIL/_imaging*.so | grep -qi imagequant
         install_ddddocr
         # .build_deps 内含 git/cmake/编译器/头文件等构建期工具，构建结束全部卸载（file/magic.mgc 未安装，bash 保留）
         $APK_CMD del .build_deps
