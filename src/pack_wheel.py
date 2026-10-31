@@ -24,9 +24,10 @@
    原生模块按顶层名 ``cv2`` 再 import 一次来规避；wheel 里不需要这层把戏，直接让扩展自己
    就是顶层的 ``cv2``（``__version__`` 由 C 代码写入，不依赖任何 py 文件）。
 
-3. 改写 ddddocr wheel 的 ``Requires-Dist``：上游写死在 linux 上依赖
-   ``opencv-python-headless``，而本仓库分发的是自编最小化 OpenCV（发行名 ``opencv``）。
-   不改这一条，消费者装 ddddocr 时永远会去 PyPI 找 musllinux 版 opencv-python-headless
+3. 断言 ddddocr wheel 的 ``Requires-Dist`` 仍是 ``opencv-python-headless``
+   （与本仓库分发的发行名一致，不做改写；上游改了依赖名要跟着确认）
+   上游声明的依赖名与本仓库分发的发行名一致，消费者装 ddddocr 时能直接命中本地这份，
+   用户想换回 PyPI 版也不必改配置
    ——那个不存在。只改这一行，其余依赖（numpy / onnxruntime / Pillow）原样保留。
 
 打包期断言（构建失败而不是交给人工检查）：``opencv.libs/`` 必须含 libjpeg / libpng /
@@ -152,7 +153,9 @@ def pack_tree(unroot: Path, dest_dir: Path) -> Path:
 
 
 def write_dist_info(unroot: Path, name: str, version: str, summary: str, requires: list[str]) -> None:
-    dist_info = unroot / f"{name}-{version}.dist-info"
+    # PEP 427：dist-info 目录名里的连字符要转义成下划线（发行名本身保持原样）
+    escaped = re.sub(r"[-_.]+", "_", name)
+    dist_info = unroot / f"{escaped}-{version}.dist-info"
     dist_info.mkdir(parents=True, exist_ok=True)
     meta = [
         "Metadata-Version: 2.1",
@@ -220,14 +223,16 @@ def build_opencv(prefix: Path, version: str, out_dir: Path) -> int:
         # auditwheel 靠 RPATH 定位 libopencv_*（它们不在 musl 的默认搜索路径里）
         subprocess.run(["patchelf", "--set-rpath", str(libdir), str(target)], check=True)
 
+        # 发行名与 PyPI 的 opencv-python-headless 一致：消费者装 ddddocr 时上游声明的
+        # 依赖名能直接命中本地这份，不需要改写元数据；用户想换回 PyPI 版时也不用改配置。
         write_dist_info(
-            unroot, "opencv", version,
+            unroot, "opencv-python-headless", version,
             "OpenCV Python bindings (core/imgproc/imgcodecs), musllinux wheel",
             ["numpy"],
         )
         # 许可文件属于再分发时该带的内容，随 dist-info 走，不占顶层命名空间
         for extra in sorted(prefix.rglob("cv2/LICENSE*.txt")):
-            licenses = unroot / f"opencv-{version}.dist-info" / "licenses"
+            licenses = unroot / f"opencv_python_headless-{version}.dist-info" / "licenses"
             licenses.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(extra, licenses / extra.name)
 
@@ -312,17 +317,17 @@ def build_ddddocr(src: Path, out_dir: Path, expect_version: str) -> int:
         )
         unroot = next(p for p in work.iterdir() if p.is_dir())
 
-        # 上游把 linux 上的 OpenCV 依赖写死成 opencv-python-headless；本仓库分发的是
-        # 自编最小化 OpenCV（发行名 opencv），不改这一行消费者装不上。
+        # 上游声明的 opencv-python-headless 正是本仓库分发的发行名，依赖名能直接命中
+        # 本地 wheelhouse 里的那份，用户想换回 PyPI 版也不必改配置。这里只做断言：
+        # 上游改了依赖名就要跟着确认，而不是默默改写元数据。
         metadata = next(unroot.glob("*.dist-info/METADATA"))
         text = metadata.read_text(encoding="utf-8")
-        patched, count = OPENCV_REQ.subn("Requires-Dist: opencv", text)
+        count = len(OPENCV_REQ.findall(text))
         if count != 1:
             raise SystemExit(
                 f"错误: {metadata.name} 里期望恰好 1 条 opencv-python-headless 依赖，实际 {count}"
                 f"（上游依赖表变了？确认后同步本脚本）"
             )
-        metadata.write_text(patched, encoding="utf-8")
         # wheel pack 会重算 RECORD，改完元数据不用手工修
         wheel = pack_tree(unroot, out_dir)
     finally:
@@ -333,7 +338,7 @@ def build_ddddocr(src: Path, out_dir: Path, expect_version: str) -> int:
     models = [e for e in entries if e[0].endswith(".onnx")]
     print(f"\n产物: {wheel.name}")
     print(f"大小: {wheel.stat().st_size / 1024 / 1024:.1f} MiB | 模型 {len(models)} 个")
-    for line in patched.splitlines():
+    for line in text.splitlines():
         if line.startswith("Requires-Dist:"):
             print(f"  {line}")
     return 0
@@ -343,7 +348,13 @@ def build_ddddocr(src: Path, out_dir: Path, expect_version: str) -> int:
 # PEP 503 索引
 # --------------------------------------------------------------------------- #
 def normalize_name(name: str) -> str:
-    return re.sub(r"[-_.]+", "_", name).lower()
+    """PEP 503 的项目名规范化：小写，连续的 ``-_.`` 折成一个连字符。
+
+    注意与 wheel 文件名的规范不同（文件名用下划线，PEP 427 的 escaped name）。
+    索引目录必须用连字符形式，客户端才找得到：``opencv-python-headless``，
+    写成 ``opencv_python_headless`` 会被当成另一个项目名。
+    """
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def emit_index(root: Path) -> int:

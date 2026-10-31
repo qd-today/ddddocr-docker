@@ -259,39 +259,33 @@ RUN if [ -n "${APK_MIRROR}" ]; then \
 RUN --mount=type=bind,from=build,source=/wheels,target=/w \
     apk add --no-cache $(cat /w/system-packages.txt) bash ca-certificates icu-data-en tzdata uv
 
-# 装包分两步，原因是索引优先级不可依赖：
+# 装包：本地 wheelhouse 的索引优先，PyPI 兜底纯 Python 依赖。
 #
-# 1) 本仓库和 onnxruntime 的 wheelhouse 里的五个包，**只**从本地取（--no-index）。
-#    不加 --no-index 的话，uv 会把 PyPI 上的同名包排在 file:// 索引之前 —— ddddocr /
-#    Pillow / numpy / onnxruntime 在 PyPI 上都有同版本文件，实测即使
-#    `--index-strategy first-index` 也照样选中 PyPI 那份；而 PyPI 的 ddddocr 元数据要求
-#    `opencv-python-headless`，musl 上没有轮子，构建会退化成源码编译并失败。加 --no-index
-#    后「这五个包一定来自 wheelhouse」是可验证的事实，而不是靠索引顺序的巧合。
-#    --no-deps 只装 wheel 本体，传递依赖交给下一步。
-# 2) onnxruntime / ddddocr 剩下的传递依赖（flatbuffers / packaging / protobuf / sympy）
-#    是纯 python 轮子，各架构都有，走 PyPI。清单写死是有意的：`uv pip check` 会在下一步
-#    立刻断言「依赖是否齐全」，上游加了依赖而清单没跟上就直接让构建失败。
+# 索引优先级（uv 官方口径）：`--index-url` 指定的默认索引永远是最低优先级，
+# `--extra-index-url` 按定义顺序查询，first-index 策略下第一个含该包的索引胜出。
+# 所以 PyPI 放默认索引、本地 wheelhouse 放 extra：本地那份一定胜出，纯 Python 依赖
+# （flatbuffers / packaging / protobuf / sympy）本地没有，落到 PyPI 取。
+#
+# 发行名与 PyPI 同名是关键：ddddocr 上游声明 `opencv-python-headless`，本仓库分发的
+# 正是同名的自编 musl 版，依赖名直接命中本地那份；用户想换回 PyPI 版也不必改配置。
 #
 # `--no-cache` 不是省事，是必须：uv 默认把解压后的包再存一份到 /root/.cache/uv，会原样
 # 进镜像层（实测多出 130MB）。
-#
-# sympy / mpmath 保留：onnxruntime 的元数据声明了它们，删掉会让 `uv pip check` 报缺失，
-# 声明与实际不一致。它们只占纯 Python 的体积，不影响 OCR 路径（ddddocr 不走符号形状推断）。
 RUN --mount=type=bind,from=build,source=/wheels,target=/wheels \
     --mount=type=bind,from=onnx-wheelhouse,source=/wheels,target=/w \
     set -eux; \
     ddddocr_req="ddddocr"; \
     if [ -n "${DDDDOCR_VERSION}" ]; then ddddocr_req="ddddocr==${DDDDOCR_VERSION}"; fi; \
     pypi="${PIP_MIRROR:-https://pypi.org/simple}"; \
-    uv pip install --system --break-system-packages --no-cache --no-deps \
-        --no-index --find-links /wheels --find-links /w \
+    uv pip install --system --break-system-packages --no-cache \
+        --index-url "${pypi}" \
+        --extra-index-url file:///wheels/simple \
+        --extra-index-url file:///w/simple \
         "${ddddocr_req}" \
-        "opencv==${OPENCV_VERSION}" \
+        "opencv-python-headless==${OPENCV_VERSION}" \
         "pillow==${PILLOW_VERSION}" \
         "onnxruntime==${ONNX_VERSION}" \
         "numpy==${NUMPY_VERSION}"; \
-    uv pip install --system --break-system-packages --no-cache \
-        --index-url "${pypi}" flatbuffers packaging protobuf sympy; \
     uv pip check --system; \
     site="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
     rm -rf "${site}"/numpy/tests; \
