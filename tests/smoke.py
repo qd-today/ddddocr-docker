@@ -1,59 +1,59 @@
 #!/usr/bin/env python3
-"""镜像冒烟测试 —— 全部平台的唯一入口，用参数显式声明「这个平台应该长什么样」。
+"""runtime 镜像冒烟测试。容器内经 stdin 执行，脚本不进镜像：
 
-容器内以 stdin 执行，脚本不进镜像、不加层、不依赖 bind mount：
-
-    docker run --rm -i --platform <platform> <image> python3 - <ocr|degraded> <platform> < tests/smoke.py
+    docker run --rm -i --platform <platform> <image> python3 - <platform> <ddddocr 版本> < tests/smoke.py
 
     # 例如
-    docker run --rm -i --platform linux/riscv64 <image> python3 - ocr linux/riscv64 < tests/smoke.py
+    docker run --rm -i --platform linux/riscv64 <image> python3 - linux/riscv64 1.6.1 < tests/smoke.py
 
-为什么不自动探测能力、而要显式传参：自动探测（能 import ddddocr 就跑 OCR 检查）
-会静默降级——万一某个 OCR 平台上的 ddddocr 意外消失，脚本会「顺滑」地改跑空壳
-检查并通过，正是我们最想抓的那种回归。显式声明期望，期望与实际不符就失败。
+验的六件事，各自挡一类回归：
 
-为什么只有一个文件：OCR 平台与空壳平台检查的是同一件事的两面（「OCR 栈能真的
-推理」/「这里确实没有 OCR 栈」），拆成两个文件会让公共的依赖探测、报告格式、
-退出码约定各写一遍，最终必然漂移。
+1. **没有 wheel 残留** —— wheelhouse 只在构建期 bind mount，`/wheels`、`/w` 出现在
+   runtime 镜像里说明那两条 RUN 的挂载没被回收（体积白涨）；
+2. **动态链接全部可解析** —— 对 cv2 / PIL 的 `.so` 跑 `ldd`，出现 `not found` 就说明
+   auditwheel 没把依赖收进 `.libs/`、或 RPATH 改错了。这条比「能 import」更早失败：
+   import 只用得到被 dlopen 的那部分符号；
+3. **Pillow 自编译契约** —— 13.x + jpg/zlib/webp + 绝不链 libimagequant（GPL-3.0）；
+4. **libprotobuf-lite 由 wheel 提供** —— 它必须来自 onnxruntime.libs/，系统里不该再
+   有 apk 装的那一份（改成 wheelhouse 分发后 apk 那条已删）；
+5. **产物架构** —— 编译产物是目标架构的机器码（QEMU 下构建时 cmake 的架构探测被
+   uname 骗过是常见事故：能编译、能跑，产物却是宿主架构）；
+6. **真实识别链路** —— 依赖 → 模型加载 → 图像编码 → ONNX 前向 → 解码输出。
+
+不断言识别准确率：合成字体与真实验证码分布不同，准确率断言会 flaky；这里只验证链路
+完整、输出结构合理。
 """
 
 import glob
+import importlib.metadata
 import io
-import subprocess
+import os
+import platform
 import struct
+import subprocess
 import sys
-
-MODES = ("ocr", "degraded")
 
 # ELF e_machine 编码（/usr/include/elf.h）
 ELF_MACHINE = {
-    "linux/amd64": 62, "linux/386": 3, "linux/arm64": 183,
-    "linux/arm/v7": 40, "linux/arm/v6": 40, "linux/ppc64le": 21,
-    "linux/riscv64": 243, "linux/s390x": 22, "linux/loong64": 258,
+    "linux/amd64": 62, "linux/arm64": 183, "linux/arm/v7": 40,
+    "linux/ppc64le": 21, "linux/riscv64": 243, "linux/loong64": 258,
 }
 
 
 def elf_machine(path):
-    """读 ELF 头的 e_machine。不依赖 readelf/file（镜像里可能没有这些工具）。"""
+    """读 ELF 头的 e_machine。不依赖 readelf/file（镜像里没有这些工具）。"""
     with open(path, "rb") as handle:
         header = handle.read(20)
     assert header[:4] == b"\x7fELF", "%s 不是 ELF 文件" % path
-    # EI_DATA: 1=小端 2=大端（s390x 是大端，e_machine 也按大端存）
-    endian = "<" if header[5] == 1 else ">"
+    endian = "<" if header[5] == 1 else ">"   # EI_DATA: 1=小端 2=大端
     return struct.unpack(endian + "H", header[18:20])[0]
 
 
-def check_arch(platform, patterns):
-    """断言镜像里的原生产物确实是目标平台的机器码。
-
-    这是「所有未显式声明的架构探测」的通用兜底：本次重构里踩到过两个坑——
-    OpenSSL 的 ./config 和 OpenCV 的 cmake 都靠 uname 探测，而原生 arm64 runner 上
-    armv7 容器走内核 compat 模式、uname 报的是宿主 aarch64。逐个去修每个 configure
-    既不可靠也不可持续，所以改成在产物层面验一次：机器码架构不对就立刻失败。
-    """
-    expected = ELF_MACHINE.get(platform)
+def check_arch(platform_name, patterns):
+    """断言镜像里的原生产物确实是目标平台的机器码。"""
+    expected = ELF_MACHINE.get(platform_name)
     if expected is None:
-        print("跳过 ELF 架构校验（未知平台 %r）" % platform)
+        print("跳过 ELF 架构校验（未知平台 %r）" % platform_name)
         return
 
     checked = 0
@@ -62,52 +62,41 @@ def check_arch(platform, patterns):
             got = elf_machine(path)
             assert got == expected, (
                 "%s 的 ELF machine=%d，期望 %d（%s）—— 构建时架构探测错了"
-                % (path, got, expected, platform)
+                % (path, got, expected, platform_name)
             )
             checked += 1
     assert checked, "没有找到可校验的原生产物（检查 glob 模式是否写错）"
-    print("ELF 架构校验通过：%d 个产物 = %s（e_machine=%d）" % (checked, platform, expected))
+    print("ELF 架构校验通过：%d 个产物 = %s（e_machine=%d）" % (checked, platform_name, expected))
 
 
-def check_common():
-    """两种镜像都必须满足的最低要求。"""
-    import platform
+def site_packages():
+    import sysconfig
 
-    print("python %s | %s" % (platform.python_version(), platform.machine()))
-
-    # libprotobuf-lite 是 onnxruntime/ddddocr 以及下游 C 扩展的运行时依赖，
-    # 任何变体都必须带着它
-    libs = glob.glob("/usr/lib/libprotobuf-lite.so*")
-    assert libs, "libprotobuf-lite 缺失（下游 C 扩展无法链接）"
-    print("libprotobuf-lite: %s" % ", ".join(sorted(libs)))
+    return sysconfig.get_paths()["purelib"]
 
 
-def check_degraded():
-    """空壳平台契约：只有 python3 + protobuf 运行时，没有任何 OCR 能力。
+def check_no_wheel_leftovers():
+    leftovers = [p for p in ("/wheels", "/w") if os.path.exists(p)]
+    if leftovers:
+        raise SystemExit("runtime 镜像里残留 wheel 目录: %s" % ", ".join(leftovers))
+    print("未发现 /wheels 或 /w（wheelhouse 只在构建期挂载）")
 
-    与 README「⚠️ 空壳镜像」一节一一对应。哪天上游补齐依赖、我们真的在这些
-    平台加上 OCR 栈，这里会失败并迫使同步更新文档与平台矩阵。
-    """
-    for mod in ("ddddocr", "cv2", "onnxruntime"):
-        try:
-            __import__(mod)
-        except ImportError:
-            print("%-12s 不存在（符合空壳契约）" % mod)
-        else:
-            raise AssertionError(
-                "%s 竟然可以 import —— 若该平台已支持 OCR，请同步更新 README 平台矩阵与本脚本" % mod
-            )
+
+def assert_resolvable(pattern, label):
+    """ldd 一遍：任何 `not found` 都说明自包含化失败。"""
+    paths = sorted(glob.glob(pattern))
+    assert paths, "%s 没有匹配到 .so（%s）" % (label, pattern)
+    bad = []
+    for path in paths:
+        out = subprocess.run(["ldd", path], capture_output=True, text=True).stdout
+        if "not found" in out:
+            bad.append("%s:\n%s" % (path, out))
+    assert not bad, "以下 %s 存在未解析的动态依赖:\n%s" % (label, "\n".join(bad))
+    print("%s：%d 个 .so 的动态依赖全部可解析" % (label, len(paths)))
 
 
 def check_pillow():
-    """Pillow 自编译契约：版本、格式矩阵、绝不链 libimagequant。
-
-    自编译 Pillow 的两个目的，靠这三条断言守住：
-      1) 拿到 13.x 的解码器 CVE 修复（Alpine 3.24 只有 12.2.0）
-      2) 不链 libimagequant（GPL-3.0）——Alpine 的 py3-pillow 链了它，会把 GPL 义务
-         带进镜像
-    哪天有人把构建改回 apk 的 py3-pillow，这里会立刻失败。
-    """
+    """Pillow 自编译契约：版本、格式矩阵、绝不链 libimagequant。"""
     from PIL import Image, features
 
     major = int(Image.__version__.split(".")[0])
@@ -119,39 +108,41 @@ def check_pillow():
     assert not features.check("libimagequant"), (
         "Pillow 链上了 libimagequant（GPL-3.0）：构建期不该装 libimagequant-dev"
     )
-    # features 之外再从动态依赖确认一遍。注意不能用 strings 扫 .so：
-    # C 扩展里始终带着 HAVE_LIBIMAGEQUANT 这类配置字符串，会误报（踩过）
-    for so in glob.glob("/usr/lib/python3*/site-packages/PIL/_imaging*.so"):
-        deps = subprocess.run(["ldd", so], capture_output=True, text=True).stdout
-        assert "imagequant" not in deps, "%s 动态链接了 libimagequant：\n%s" % (so, deps)
 
-    # CVE 都在解码路径上：格式矩阵正确也要确认真的能往返
     img = Image.new("RGB", (120, 40), "white")
     for fmt in ("PNG", "JPEG", "WEBP"):
         buf = io.BytesIO()
         img.save(buf, fmt)
         buf.seek(0)
         with Image.open(buf) as back:
-            back.load()  # 触发解码
+            back.load()      # 触发解码
             assert back.size == (120, 40), "%s 往返尺寸不一致：%s" % (fmt, back.size)
 
-    print("Pillow %s | jpg/zlib/webp 可用 | 无 libimagequant | 编解码往返 OK"
-          % Image.__version__)
+    print("Pillow %s | jpg/zlib/webp 可用 | 无 libimagequant | 编解码往返 OK" % Image.__version__)
 
 
-def check_ocr():
-    """完整 OCR 平台：依赖 → 模型加载 → 图像编码 → ONNX 前向 → 解码输出。
+def check_protobuf_bundled():
+    """libprotobuf-lite 必须由 onnxruntime wheel 自带，系统里不该再有 apk 版。"""
+    libs = sorted(glob.glob(os.path.join(site_packages(), "onnxruntime.libs", "libprotobuf-lite*")))
+    assert libs, "onnxruntime.libs/ 里没有 libprotobuf-lite —— onnxruntime wheel 不自包含"
+    system = glob.glob("/usr/lib/libprotobuf-lite.so*") + glob.glob("/lib/libprotobuf-lite.so*")
+    assert not system, "系统里还有 apk 装的 libprotobuf-lite: %s（应改由 wheel 提供）" % system
+    print("libprotobuf-lite 由 wheel 提供：%s" % ", ".join(os.path.basename(p) for p in libs))
 
-    不断言识别准确率：合成字体与真实验证码分布不同，准确率断言会 flaky；
-    这里只验证链路完整、输出结构合理，即镜像里的 OpenCV/onnxruntime 真的能用。
-    """
+
+def check_ocr(expected_version):
+    """完整 OCR 平台：依赖 → 模型加载 → 图像编码 → ONNX 前向 → 解码输出。"""
     import cv2
     import ddddocr
     import numpy as np
     import onnxruntime
 
-    print("cv2 %s | numpy %s | onnxruntime %s"
-          % (cv2.__version__, np.__version__, onnxruntime.__version__))
+    version = importlib.metadata.version("ddddocr")
+    assert version == expected_version, (
+        "ddddocr 版本不符：%s != %s（构建参数与冒烟参数不一致？）" % (version, expected_version)
+    )
+    print("ddddocr %s | cv2 %s | numpy %s | onnxruntime %s"
+          % (version, cv2.__version__, np.__version__, onnxruntime.__version__))
 
     # 合成一张 120x40 的白底验证码图，不依赖任何外部素材
     img = np.full((40, 120, 3), 255, dtype=np.uint8)
@@ -171,28 +162,41 @@ def check_ocr():
 
 
 def main(argv):
-    mode = argv[1] if len(argv) > 1 else ""
-    platform = argv[2] if len(argv) > 2 else ""
-    if mode not in MODES:
-        raise SystemExit("用法: python3 - <%s> [platform] < tests/smoke.py" % "|".join(MODES))
+    platform_name = argv[1] if len(argv) > 1 else ""
+    expected_version = argv[2] if len(argv) > 2 else ""
+    if not platform_name or not expected_version:
+        raise SystemExit(
+            "用法: python3 - <platform> <ddddocr 版本> < tests/smoke.py"
+            "，例如 python3 - linux/arm64 1.6.1 < tests/smoke.py"
+        )
 
-    print("== 通用检查 ==")
-    check_common()
-    # 只校验必然存在的原生库；-O 规则避免命中符号链接以外的中间文件
-    arch_patterns = ["/usr/lib/libprotobuf-lite.so.*"]
-    if mode == "ocr":
-        arch_patterns += [
-            "/usr/lib/libopencv_core.so.*",
-            "/usr/lib/python3.*/site-packages/cv2/cv2*.so",
-        ]
-    check_arch(platform, arch_patterns)
-    print("== %s 检查 ==" % mode)
-    if mode == "ocr":
-        check_pillow()
-        check_ocr()
-    else:
-        check_degraded()
-    print("smoke(%s): PASS" % mode)
+    print("== 环境 ==")
+    print("python %s | %s | %s" % (platform.python_version(), platform.machine(), sys.platform))
+
+    print("== 无 wheel 残留 ==")
+    check_no_wheel_leftovers()
+
+    print("== Pillow ==")
+    check_pillow()
+    assert_resolvable(os.path.join(site_packages(), "PIL", "_imaging*.so"), "PIL 扩展")
+
+    print("== OpenCV ==")
+    assert_resolvable(os.path.join(site_packages(), "cv2*.so"), "cv2 扩展")
+
+    print("== protobuf ==")
+    check_protobuf_bundled()
+
+    print("== 产物架构 ==")
+    check_arch(platform_name, [
+        os.path.join(site_packages(), "cv2*.so"),
+        os.path.join(site_packages(), "PIL", "_imaging*.so"),
+        os.path.join(site_packages(), "onnxruntime", "capi", "onnxruntime_pybind11_state.so"),
+    ])
+
+    print("== 识别链路 ==")
+    check_ocr(expected_version)
+
+    print("smoke(%s): PASS" % platform_name)
 
 
 if __name__ == "__main__":

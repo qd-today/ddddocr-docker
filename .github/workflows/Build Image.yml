@@ -1,393 +1,92 @@
-name: Publish Package
+name: Build Image
+
+# 薄调用方：真正的流水线在 _image.yml（plan → build → smoke → publish）。
+# 这里只做两件事：决定什么时候跑、把 dispatch 的输入原样传下去。
+#
+# 每个平台产出两个镜像：
+#   <ddddocr_version>            可运行镜像（python3 + ddddocr + cv2 + onnxruntime），
+#                                滚动 tag latest
+#   <ddddocr_version>-wheelhouse wheel 载体镜像（scratch + /wheels），滚动 tag wheelhouse
+#
+# 只在两种情况下构建：
+#   * workflow_dispatch —— 手动触发，默认只构建+冒烟、不发布
+#   * tag 推送          —— 正式发布
+# 普通 push 到 main 不构建：QEMU 架构一次全量构建以小时计，每次 merge 都跑既费额度
+# 也没有额外信息（改动是否可用，dispatch 一次就能验）。
 on:
+  push:
+    tags:
+      - '*'
   workflow_dispatch:
     inputs:
       push:
-        description: '构建并通过冒烟测试后推送到 ghcr.io 与 Docker Hub（不勾选则只构建+冒烟验证，不发布任何镜像）'
+        description: '构建并通过冒烟测试后发布到 Docker Hub（不勾选则只构建+冒烟，不发布任何镜像）'
         type: boolean
         default: false
       platforms:
-        description: '要构建的平台列表，逗号分隔不要空格，如 linux/amd64,linux/arm64；留空=全部 9 平台（含 loong64）。⚠️ 子集构建默认禁止发布'
+        description: '要构建的平台，逗号分隔不要空格；留空=默认全部 6 个（linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le,linux/riscv64,linux/loong64）。子集构建禁止发布'
         type: string
         default: ''
+      apk_mirror:
+        description: 'apk 镜像源，如 https://mirrors.tuna.tsinghua.edu.cn（留空=官方源）'
+        type: string
+        default: ''
+      pip_mirror:
+        description: 'PyPI 镜像源，如 https://pypi.tuna.tsinghua.edu.cn/simple（留空=官方 PyPI）'
+        type: string
+        default: ''
+      alpine_version:
+        description: 'alpine 版本；决定 Python 小版本，进而决定 wheel 的 cpXX tag'
+        type: string
+        default: '3.24'
+      opencv_version:
+        description: 'OpenCV 源码版本（自编最小化 wheel：core/imgproc/imgcodecs）'
+        type: string
+        default: '4.14.0'
+      pillow_version:
+        description: 'Pillow 源码版本（自编 wheel，不链 libimagequant）'
+        type: string
+        default: '13.0.0'
+      onnx_version:
+        description: 'onnxruntime 版本；同时决定用哪个 a76yyyy/onnxruntime:<ver>-wheelhouse'
+        type: string
+        default: '1.24.4'
+      numpy_version:
+        description: 'numpy 版本（由 onnxruntime 的 wheelhouse 提供）'
+        type: string
+        default: '2.4.6'
+      dddocr_version:
+        description: 'ddddocr 版本（同时是 runtime 镜像的 tag；wheelhouse 镜像为 <ver>-wheelhouse）'
+        type: string
+        default: '1.6.1'
+      dddocr_ref:
+        description: 'ddddocr 的 git ref；tag 发布时忽略此项，改用 ddddocr.version 锁定的 commit'
+        type: string
+        default: 'master'
       native_arm:
-        description: '用 GitHub 原生 arm64 runner（ubuntu-24.04-arm）构建 arm64，比 QEMU 快 3-5 倍；若该 runner 不可用则取消勾选回退 QEMU'
+        description: '用 GitHub 原生 arm64 runner 构建 arm64（比 QEMU 快一个数量级）；runner 不可用时取消勾选回退 QEMU'
         type: boolean
         default: true
-      allow_partial_publish:
-        description: '允许用平台子集发布（会用不完整 manifest 覆盖正式 tag，仅在明确知道后果时勾选）'
-        type: boolean
-        default: false
-  push:
-    paths-ignore:
-      - '.github/**'
-      - '**.md'
-    tags: ["*"]
-
-# 发布意图（唯一判定点）：dispatch 勾 push，或推送版本 tag
-env:
-  PUBLISH: ${{ github.event.inputs.push == 'true' || startsWith(github.ref, 'refs/tags/') }}
-
-# 构建 / 测试 / 发布 三阶段解耦：
-#   1) build  ：按架构组并行构建（arm64 走原生 runner），发布模式下按 digest 推到 ghcr（不产任何 tag）
-#   2) smoke  ：从 build 阶段写下的层缓存重建单平台镜像（命中缓存 = 不再编译），实际跑推理链路
-#   3) publish：只有全部构建 + 全部冒烟通过才执行，用 imagetools 把各组 digest 合并成正式 tag
-# 收益：① 测试失败绝不产生任何 tag；② 同一 commit 的「验证构建 → 冒烟 → 发布」共用同一份层缓存，
-# 发布时不重新编译；③ 各组并行，墙钟时间从 ~6h 降到最慢组（~2-3h）。
-
+      cache_bust:
+        description: '缓存 scope 后缀。留空=复用缓存；填任意值=强制不复用旧层（基准测试用）'
+        type: string
+        default: ''
 jobs:
-  plan:
-    runs-on: ubuntu-latest
-    name: Plan build groups
-    outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-      smoke_matrix: ${{ steps.plan.outputs.smoke_matrix }}
-      expected: ${{ steps.plan.outputs.expected }}
-      full: ${{ steps.plan.outputs.full }}
-      dddocr_ref: ${{ steps.pin.outputs.ref }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Check Dockerfile.loong64 in sync
-        # loong64 变体由主 Dockerfile 经 sed 生成（两处替换：基础镜像 + case 平台列表加入 loong64）；
-        # 此处用同款 sed 重新生成并精确比对，防止两边演化漂移
-        run: |
-          sed -e 's@^FROM alpine:3.24$@# loong64 专用：Docker Hub 官方 alpine 镜像无 loong64 变体，改用龙芯社区构建的对应版本\n# （ghcr.io/loong64/alpine，QEMU on GitHub Actions，源码来自 docker-library）\nFROM ghcr.io/loong64/alpine:3.24@' \
-              -e 's@linux/amd64|linux/arm64|linux/arm/v7|linux/ppc64le|linux/riscv64)@linux/amd64|linux/arm64|linux/arm/v7|linux/ppc64le|linux/riscv64|linux/loong64)@' \
-              Dockerfile > /tmp/Dockerfile.loong64
-          if ! diff /tmp/Dockerfile.loong64 Dockerfile.loong64; then
-            echo "::error::Dockerfile.loong64 与 Dockerfile 不同步，请用 workflow 中同款 sed 命令重新生成"
-            exit 1
-          fi
-      - name: Resolve ddddocr ref
-        # tag 发布 -> 用 ddddocr.version 锁定的上游 commit（可复现）；其余 -> 跟随上游 master。
-        # 走 step output 而非 $GITHUB_ENV：env 上下文不反映 GITHUB_ENV 的运行时写入，
-        # 用 ${{ env.X }} 会静默取空并回退 master（版本 tag 的 pin 会失效）。
-        # 该 ref 同时传给所有 build 与 smoke job —— build-args 不一致会直接导致缓存不命中。
-        id: pin
-        run: |
-          if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
-            echo "ref=$(tr -d ' \n' < ddddocr.version)" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=master" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Compute build matrix
-        id: plan
-        env:
-          PLATFORMS_INPUT: ${{ github.event.inputs.platforms }}
-          NATIVE_ARM: ${{ github.event.inputs.native_arm == 'false' && 'false' || 'true' }}
-        run: |
-          # 先写临时文件再回显：python 的 stdout 若直接重定向到 $GITHUB_OUTPUT，
-          # 任何人类可读输出都会污染 key=value 格式
-          python3 - <<'PY' > /tmp/plan.out
-          import json, os, sys
-
-          raw = (os.environ.get("PLATFORMS_INPUT") or "").strip()
-          ALL = ["linux/amd64", "linux/386", "linux/arm64", "linux/arm/v7", "linux/arm/v6",
-                 "linux/ppc64le", "linux/riscv64", "linux/s390x", "linux/loong64"]
-          plats = [p.strip() for p in raw.split(",") if p.strip()] if raw else list(ALL)
-          bad = [p for p in plats if p not in ALL]
-          if bad:
-              sys.exit("::error::未知平台: %s（可选: %s）" % (",".join(bad), ",".join(ALL)))
-
-          native = (os.environ.get("NATIVE_ARM", "true") != "false")
-          arm_runner = "ubuntu-24.04-arm" if native else "ubuntu-latest"
-
-          # 按「是否本机原生 + 编译量级」分组，组间完全并行、互不抢 CPU。
-          # ppc64le 与 riscv64 各自独立成组：两者都要在 QEMU 下源码编译 OpenCV，
-          # 是最慢的两个，让它们并排跑而不是串行累加
-          GROUPS = [
-              ("x86",     "ubuntu-latest", ["linux/amd64", "linux/386"],                    "Dockerfile"),
-              ("arm",     arm_runner,      ["linux/arm64", "linux/arm/v7", "linux/arm/v6"], "Dockerfile"),
-              ("ppc64le", "ubuntu-latest", ["linux/ppc64le", "linux/s390x"],                "Dockerfile"),
-              ("riscv64", "ubuntu-latest", ["linux/riscv64"],                               "Dockerfile"),
-              ("loong64", "ubuntu-latest", ["linux/loong64"],                               "Dockerfile.loong64"),
-          ]
-          include = []
-          for name, runner, group_plats, dockerfile in GROUPS:
-              sel = [p for p in group_plats if p in plats]
-              if sel:
-                  include.append({"group": name, "runner": runner,
-                                  "platforms": ",".join(sel), "file": dockerfile})
-          if not include:
-              sys.exit("::error::没有可构建的平台")
-
-          print("matrix=" + json.dumps({"include": include}))
-          print("expected=" + ",".join(plats))
-          print("full=%s" % str(sorted(plats) == sorted(ALL)).lower())
-
-          # 冒烟矩阵：每个平台一个 job，用对应构建组的层缓存重建单平台镜像后真跑。
-          # 这样行为验证覆盖全部 9 平台（6 个 OCR + 3 个空壳），而不是只靠构建期断言；
-          # 构建期只留「产物自洽」的 import 级检查
-          GROUP_OF = {
-              "linux/amd64": "x86", "linux/386": "x86",
-              "linux/arm64": "arm", "linux/arm/v7": "arm", "linux/arm/v6": "arm",
-              "linux/ppc64le": "ppc64le", "linux/s390x": "ppc64le",
-              "linux/riscv64": "riscv64", "linux/loong64": "loong64",
-          }
-          OCR = {"linux/amd64", "linux/arm64", "linux/arm/v7",
-                 "linux/ppc64le", "linux/riscv64", "linux/loong64"}
-          smoke = []
-          for p in plats:
-              smoke.append({
-                  "platform": p,
-                  "group": GROUP_OF[p],
-                  "kind": "ocr" if p in OCR else "degraded",
-                  # 只在本机原生架构上直接跑；其余跨架构平台用 QEMU（runner 仍留 x64）
-                  "runner": arm_runner if p == "linux/arm64" else "ubuntu-latest",
-              })
-          print("smoke_matrix=" + json.dumps({"include": smoke}))
-          PY
-          echo "--- 构建分组 ---"
-          sed -n 's/^matrix=//p' /tmp/plan.out | python3 -m json.tool
-          echo "--- 冒烟矩阵 ---"
-          sed -n 's/^smoke_matrix=//p' /tmp/plan.out | python3 -m json.tool
-          echo "--- 其余输出 ---"
-          grep -Ev '^(matrix|smoke_matrix)=' /tmp/plan.out
-          cat /tmp/plan.out >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: plan
-    name: Build ${{ matrix.group }} (${{ matrix.platforms }})
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 300
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up QEMU
-        # 组内跨架构平台（如 arm 组里的 armv7/armv6、x86 组里的 386）需要 binfmt。
-        # 本机架构不受影响：docker 只在架构不匹配时才走 qemu 处理器
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to GitHub Container Registry
-        id: login-ghcr
-        if: env.PUBLISH == 'true'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./${{ matrix.file }}
-          platforms: ${{ matrix.platforms }}
-          # 发布模式按 digest 推到 ghcr：不产生任何 tag（无需清理），
-          # 由 publish 阶段用 imagetools 把各组 digest 合并成正式多架构 tag
-          push: ${{ env.PUBLISH == 'true' }}
-          outputs: ${{ env.PUBLISH == 'true' && format('type=image,name=ghcr.io/{0}/ddddocr,push-by-digest=true,name-canonical=true', github.repository_owner) || '' }}
-          build-args: |
-            DDDDOCR_VERSION=${{ needs.plan.outputs.dddocr_ref }}
-          # 缓存按架构组隔离：同一 commit 的「验证构建 → 冒烟 → 发布」都能复用已编译的层，
-          # 把重复构建压到只剩导出时间。ignore-error=true 保证缓存服务异常不挂掉发布
-          cache-from: type=gha,scope=ddddocr-${{ matrix.group }}
-          cache-to: type=gha,mode=max,scope=ddddocr-${{ matrix.group }},ignore-error=true
-      - name: Export digest
-        if: env.PUBLISH == 'true'
-        run: |
-          set -eu
-          mkdir -p /tmp/digests
-          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.group }}.digest"
-          echo "digest: $(cat "/tmp/digests/${{ matrix.group }}.digest")"
-      - name: Upload digest
-        if: env.PUBLISH == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: digests-${{ matrix.group }}
-          path: /tmp/digests/*.digest
-          retention-days: 1
-          if-no-files-found: error
-
-  # ---- 冒烟测试：与构建解耦的独立信号源。
-  # 每个平台一个 job：用对应构建组的层缓存重建单平台镜像（命中缓存 = 秒级，不重新编译），
-  # 再在真实环境里跑该平台镜像。行为验证因此覆盖全部 9 平台，而构建期只留 import 级自洽检查。
-  # 所有平台共用 tests/smoke.py，用参数区分期望（ocr = 真实推理链路，
-  # degraded = 断言「这里确实没有 OCR 栈」），避免每个平台一份脚本各自漂移。
-  smoke:
-    needs: [plan, build]
-    name: Smoke ${{ matrix.platform }} (${{ matrix.kind }})
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    if: ${{ needs.build.result == 'success' }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.smoke_matrix) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up QEMU
-        # 跨架构平台（armv7/armv6/ppc64le/s390x/riscv64/loong64，以及回退模式下的 arm64）
-        # 需要 binfmt 才能在 x64 runner 上执行；本机原生架构不走 qemu
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Materialize image from cache (${{ matrix.platform }})
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./${{ matrix.group == 'loong64' && 'Dockerfile.loong64' || 'Dockerfile' }}
-          platforms: ${{ matrix.platform }}
-          load: true
-          push: false
-          tags: ddddocr-smoke:test
-          provenance: false
-          # build-args 必须与 build 阶段完全一致，否则缓存必然不命中（会退化成全量重编译）
-          build-args: |
-            DDDDOCR_VERSION=${{ needs.plan.outputs.dddocr_ref }}
-          cache-from: type=gha,scope=ddddocr-${{ matrix.group }}
-      # 脚本经 stdin 喂给容器（python3 -），无需把文件塞进镜像，也用不到 bind mount。
-      # matrix.kind 显式传入而不是让脚本自动探测能力——自动探测会静默降级，
-      # 把「某个 OCR 平台上的 ddddocr 意外消失」这种回归变成一次通过
-      - name: Run smoke (${{ matrix.kind }})
-        run: |
-          docker run --rm -i --platform ${{ matrix.platform }} ddddocr-smoke:test \
-            python3 - ${{ matrix.kind }} ${{ matrix.platform }} < tests/smoke.py
-
-  publish:
-    needs: [plan, build, smoke]
-    name: Merge digests and publish
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # 三道闸门：① 有发布意图 ② 没有任何失败（冒烟失败 = 不发布；被跳过的 job 不算失败）
-    # ③ 平台集合完整（见下面的 guard）——防止用不完整 manifest 覆盖正式 tag
-    if: ${{ (github.event.inputs.push == 'true' || startsWith(github.ref, 'refs/tags/')) && !cancelled() && !contains(needs.*.result, 'failure') }}
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Guard - reject partial publish
-        if: ${{ needs.plan.outputs.full != 'true' && github.event.inputs.allow_partial_publish != 'true' }}
-        run: |
-          echo "::error::当前平台子集（${{ needs.plan.outputs.expected }}）不是完整平台集合，禁止发布。"
-          echo "::error::用子集发布会把多平台正式 manifest 覆盖成不完整版本（1.6.1 latest 事故同类）。"
-          echo "::error::确需如此请勾选 allow_partial_publish。"
-          exit 1
-      - uses: actions/checkout@v4
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          pattern: digests-*
-          path: /tmp/digests
-          merge-multiple: true
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - id: login-ghcr
-        name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: login-dockerhub
-        name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          registry: docker.io
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-        continue-on-error: true
-      - id: meta
-        name: Docker meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            name=ghcr.io/${{ github.repository_owner }}/ddddocr,enable=${{ steps.login-ghcr.outcome == 'success' }}
-            name=docker.io/a76yyyy/ddddocr,enable=${{ steps.login-dockerhub.outcome == 'success' }}
-          # 显式关闭 auto latest：默认 latest=auto 会在 tag 事件自动附加 latest，
-          # 与下方 raw latest 规则叠加产生重复 tag（曾导致 Merge 对 latest 双重合并）
-          flavor: |
-            latest=false
-          tags: |
-            type=ref,event=tag
-            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') }}
-      - name: Create multi-arch manifests from digests
-        env:
-          TAGS: ${{ steps.meta.outputs.tags }}
-        run: |
-          set -euo pipefail
-          OWNER="${{ github.repository_owner }}"
-          PREFIX="ghcr.io/${OWNER}/ddddocr@"
-          SRCS=""
-          for f in /tmp/digests/*.digest; do
-            SRCS="$SRCS ${PREFIX}$(cat "$f")"
-          done
-          echo "聚合来源:${SRCS}"
-          while IFS= read -r TAG; do
-            [ -z "$TAG" ] && continue
-            echo "::group::合并 -> ${TAG}"
-            docker buildx imagetools create -t "$TAG" $SRCS
-            echo "::endgroup::"
-          done <<< "$(echo "${TAGS}" | sort -u)"
-      - name: Keep loong64-only tags
-        # 兼容旧客户端：保留 latest-loong64 等后缀 tag（单架构，可直接拉取）
-        env:
-          TAGS: ${{ steps.meta.outputs.tags }}
-        run: |
-          set -euo pipefail
-          OWNER="${{ github.repository_owner }}"
-          LOONG=$(cat /tmp/digests/loong64.digest 2>/dev/null || true)
-          if [ -z "$LOONG" ]; then
-            echo "本次未构建 loong64，跳过后缀 tag"
-            exit 0
-          fi
-          while IFS= read -r TAG; do
-            [ -z "$TAG" ] && continue
-            docker buildx imagetools create -t "${TAG}-loong64" "ghcr.io/${OWNER}/ddddocr@${LOONG}"
-          done <<< "$(echo "${TAGS}" | sort -u)"
-      - name: Verify manifest platform completeness
-        # 发布后断言：每个正式 tag 的平台集合必须与计划完全一致。
-        # 这是 1.6.1 那次 latest 被单架构覆盖事故的自动化防线——此前只能靠人工核对
-        env:
-          TAGS: ${{ steps.meta.outputs.tags }}
-          EXPECTED: ${{ needs.plan.outputs.expected }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json, os, subprocess, sys
-
-          expected = {p.strip() for p in os.environ["EXPECTED"].split(",") if p.strip()}
-          tags = sorted({t.strip() for t in os.environ["TAGS"].split() if t.strip()})
-
-          def platforms(tag):
-              try:
-                  raw = subprocess.run(
-                      ["docker", "buildx", "imagetools", "inspect", "--raw", tag],
-                      capture_output=True, text=True, check=True).stdout
-              except subprocess.CalledProcessError as e:
-                  raise SystemExit("::error::无法读取 %s 的 manifest: %s" % (tag, (e.stderr or "").strip()[:300]))
-              idx = json.loads(raw)
-              out = set()
-              for m in idx.get("manifests", []):
-                  p = m.get("platform") or {}
-                  arch = p.get("architecture")
-                  # 跳过 attestation 清单（architecture=unknown）
-                  if not arch or arch == "unknown":
-                      continue
-                  variant = p.get("variant")
-                  out.add("%s/%s%s" % (p.get("os", "linux"), arch, "/" + variant if variant else ""))
-              return out
-
-          failed = False
-          for tag in tags:
-              got = platforms(tag)
-              if got == expected:
-                  print("OK   %s -> %d 平台" % (tag, len(got)))
-                  continue
-              failed = True
-              print("FAIL %s" % tag)
-              print("     缺失: %s" % (sorted(expected - got) or "无"))
-              print("     多余: %s" % (sorted(got - expected) or "无"))
-          if failed:
-              sys.exit("::error::manifest 平台完整性校验失败")
-          PY
+  image:
+    uses: ./.github/workflows/_image.yml
+    secrets: inherit
+    with:
+      # tag 推送时 github.event.inputs 全是 null，各输入退回 workflow_call 里的默认值
+      push: ${{ github.event.inputs.push == 'true' }}
+      platforms: ${{ github.event.inputs.platforms || '' }}
+      apk_mirror: ${{ github.event.inputs.apk_mirror || '' }}
+      pip_mirror: ${{ github.event.inputs.pip_mirror || '' }}
+      alpine_version: ${{ github.event.inputs.alpine_version || '3.24' }}
+      opencv_version: ${{ github.event.inputs.opencv_version || '4.14.0' }}
+      pillow_version: ${{ github.event.inputs.pillow_version || '13.0.0' }}
+      onnx_version: ${{ github.event.inputs.onnx_version || '1.24.4' }}
+      numpy_version: ${{ github.event.inputs.numpy_version || '2.4.6' }}
+      dddocr_version: ${{ github.event.inputs.dddocr_version || '1.6.1' }}
+      dddocr_ref: ${{ github.event.inputs.dddocr_ref || 'master' }}
+      native_arm: ${{ github.event.inputs.native_arm != 'false' }}
+      cache_bust: ${{ github.event.inputs.cache_bust || '' }}

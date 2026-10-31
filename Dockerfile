@@ -1,198 +1,303 @@
-# 基础镜像
-FROM alpine:3.24
+# syntax=docker/dockerfile:1.7
+#
+# ddddocr 运行栈 -> musllinux wheelhouse（+ 可运行镜像）
+#
+# 三个出口：
+#   build   ：编译 OpenCV / Pillow，打好三个 wheel，产出 /wheels（不对外）
+#   wheel   ：`FROM scratch` + /wheels，只做 wheel 载体（CI 发成 <ver>-wheelhouse）
+#   runtime ：alpine + python3 + 从 wheelhouse 装的包，可直接运行，里面**没有** /wheels
+#
+# wheelhouse 契约（/wheels）：
+#   opencv-<ver>-cpXXX-cpXXX-musllinux_1_2_<arch>.whl
+#   pillow-<ver>-cpXXX-cpXXX-musllinux_1_2_<arch>.whl
+#   ddddocr-<ver>-py3-none-any.whl          # 纯 python + 85MB 模型文件，与架构无关
+#   SHA256SUMS / system-packages.txt / simple/
+#
+# 三个包各自解决的问题：
+#   * opencv —— apk 的 py3-opencv 会拖进 Qt6 / OpenGL / FFmpeg（约 236MB），PyPI 也没有
+#     musllinux 轮子，所以自编最小化版本（core / imgproc / imgcodecs + Python 绑定）。
+#   * Pillow —— Alpine 3.24 只有 12.2.0，JPEG/TIFF/FPX 解码的 5 条堆溢出要 13.0.0 才修；
+#     且 apk 的 py3-pillow 链了 GPL-3.0 的 libimagequant，自编时不给 libimagequant-dev
+#     就不会链上（Pillow 本体是 MIT-CMU）。
+#   * onnxruntime / numpy —— 不在本仓库编译，取自 a76yyyy/onnxruntime:<ver>-wheelhouse
+#     （bind mount 其 /wheels）。libprotobuf-lite 已 bundle 在 onnxruntime.libs/ 里，
+#     所以不再 apk add。
+#
+# 用法：
+#   docker buildx build --platform linux/arm64 --target wheel --output type=local,dest=./dist .
+#   docker buildx build --platform linux/arm64 --target runtime -t ddddocr:test .
 
-# 维护者信息
-LABEL maintainer "a76yyyy <q981331502@163.com>"
-LABEL org.opencontainers.image.source=https://github.com/qd-today/ddddocr-docker
-ARG TARGETPLATFORM
-ARG TARGETARCH
+ARG ALPINE_VERSION=3.24
+# loong64 没有官方 alpine 镜像，得走 ghcr.io/loong64/alpine，所以基座做成参数
+ARG BASE_IMAGE=alpine:${ALPINE_VERSION}
+# onnxruntime / numpy 的来源（同仓库另一条流水线的产物）
+ARG ONNX_WHEELHOUSE=a76yyyy/onnxruntime:1.24.4-wheelhouse
 
-ARG APK_MIRROR=""  #e.g., https://mirrors.tuna.tsinghua.edu.cn
-ARG PIP_MIRROR=""  #e.g., https://pypi.tuna.tsinghua.edu.cn/simple
-ARG GIT_DOMAIN=https://github.com   #e.g., https://gh-proxy.com/https://github.com or https://gitee.com
+########################################################################
+# 外来的 wheelhouse：只是把 /wheels 借给下面两个阶段用
+########################################################################
+FROM ${ONNX_WHEELHOUSE} AS onnx-wheelhouse
 
-# Envirenment for dddocr
-ARG DDDDOCR_VERSION=master
-# ENV DDDDOCR_VERSION=${DDDDOCR_VERSION}
-# OpenCV 源码版本：自编译最小化构建（core/imgproc/imgcodecs），替代体积臃肿的 apk py3-opencv
+########################################################################
+# 构建：编译 OpenCV / Pillow，打 wheel
+########################################################################
+FROM ${BASE_IMAGE} AS build
+
+ARG APK_MIRROR=""
+ARG PIP_MIRROR=""
+ARG GIT_DOMAIN=https://github.com
+ARG DDDDOCR_REF=master
+ARG DDDDOCR_VERSION=""
 ARG OPENCV_VERSION=4.14.0
 # OpenCV 的 CPU 基线优化开关（opt-in，留空 = OpenCV 默认行为）。
 # 仅 armv7 有意义：ARM32 上 NEON 是可选扩展，OpenCV 默认不启用（Baseline 为空）。
-# 例：--build-arg OPENCV_CPU_BASELINE=NEON
-# 注意：开了 NEON 的 arm/v7 镜像无法在 armv6-only 的 CPU 上运行，故不作默认。
 ARG OPENCV_CPU_BASELINE=""
-# Pillow 源码版本：自编译的理由有两条
-#   1) 安全：Alpine 3.24 只有 py3-pillow 12.2.0，而 JPEG/TIFF/FPX 解码的 5 条堆溢出
-#      要 13.0.0 才修；dependabot 要求的最高 first_patched 也是 13.0.0
-#   2) 许可：Alpine 的 py3-pillow 链了 libimagequant（GPL-3.0），会把这个义务带进镜像；
-#      自编译时 build_deps 里不放 libimagequant-dev，就不会链上（Pillow 本体是 MIT-CMU）
-# 只开验证码实际用得到的格式：jpeg / png(zlib) / webp；不装 tiff/freetype/lcms2
 ARG PILLOW_VERSION=13.0.0
+ARG NUMPY_VERSION=2.4.6
+ARG AUDITWHEEL_VERSION=6.8.2
+ARG TARGETARCH
 
-# Install packages
-RUN <<EOT
-#!/usr/bin/env sh
-set -eux
-# v3.24 起 py3-onnxruntime / py3-pillow / py3-numpy 均在 community 仓，无需 testing 源
-APK_CMD="apk"
-if [ "x" != "x${APK_MIRROR}" ]; then
-    APK_CMD="apk --repositories-file=/dev/null -X $APK_MIRROR/alpine/v3.24/main -X $APK_MIRROR/alpine/v3.24/community"
-fi
-$APK_CMD update
-# 运行时保留 bash（兼容上层镜像与用户脚本）；file 及其 magic.mgc 特征库用不到（busybox sh 即可）；git 归入 .build_deps 用完即删
-$APK_CMD add --update --no-cache bash tzdata ca-certificates python3 py3-six
-# ln -s /usr/bin/python3 /usr/bin/python
+LABEL maintainer="a76yyyy <q981331502@163.com>"
+LABEL org.opencontainers.image.source=https://github.com/qd-today/ddddocr-docker
 
-# 安装 ddddocr 本体并清理（各 OCR 平台共用）：init+fetch 拉取支持 分支名/tag/SHA，--no-deps 安装
-install_ddddocr() {
-    git init -q /ddddocr
-    cd /ddddocr
-    git remote add origin $GIT_DOMAIN/sml2h3/ddddocr.git
-    git fetch --depth 1 -q origin $DDDDOCR_VERSION
-    git checkout -q FETCH_HEAD
-    # 上游已无 setup.py（依赖改由 apk 预装），用 --no-deps 安装 ddddocr 本体
-    PIP_INSTALL="pip install"
-    if [ "x" != "x$PIP_MIRROR" ]; then
-        PIP_INSTALL="pip install --index-url $PIP_MIRROR"
-    fi
-    $PIP_INSTALL --no-cache-dir --no-deps --compile --break-system-packages .
-    # onnxruntime 的 py3-sympy 依赖仅用于符号形状推断，ddddocr 不使用；连同 dist-info 元数据与 isympy.py 一并删除
-    rm -rf /usr/lib/python3.*/site-packages/sympy* /usr/lib/python3.*/site-packages/mpmath* /usr/lib/python3.*/site-packages/isympy.py
-    # 删除 numpy 测试套件与标准库 turtledemo（运行时无用）
-    rm -rf /usr/lib/python3.*/site-packages/numpy/tests /usr/lib/python3.*/turtledemo
-    cd / && rm -rf /ddddocr
-}
+# 镜像源（国内构建用）：把 APK_MIRROR 末尾的 / 去掉后整体替换 host
+RUN if [ -n "${APK_MIRROR}" ]; then \
+        sed -i "s|https://dl-cdn.alpinelinux.org|${APK_MIRROR%/}|g" /etc/apk/repositories; \
+    fi \
+ && cat /etc/apk/repositories
 
-case "${TARGETPLATFORM}" in
-    linux/amd64|linux/arm64|linux/arm/v7|linux/ppc64le|linux/riscv64)
-        # 这些架构无 apk py3-opencv（Alpine 因 Qt6 迁移已将其从主流架构移除），PyPI 亦无 musllinux wheel，
-        # 故自源码编译最小化 OpenCV：仅 core/imgproc/imgcodecs（ddddocr 实际使用范围），
-        # 关闭 Qt/OpenGL/FFmpeg 等 GUI 与视频后端，编译后剥离调试符号
-        # 注：ppc64le/riscv64 在 QEMU 下编译耗时显著增加（CI 中约 30-90 分钟），但镜像保持 ~465MB 精简体积；
-        # 这两个架构虽有 apk 预编译 opencv，但其 Qt6/X11 依赖链使镜像胀至 ~600-770MB，故不采用
-        # py3-pillow 换成自编译版本（见 PILLOW_VERSION 说明），运行时只保留 Pillow 的
-        # C 扩展动态链接的库；tiff/freetype 不开，故不装。
-        # libwebpmux/libwebpdemux 必须显式列：OpenCV 的 imgcodecs 链接 libwebpmux.so.3，
-        # 之前是靠 py3-pillow 的依赖间接带进来的，去掉它就会 import cv2 失败
-        $APK_CMD add --update --no-cache py3-onnxruntime py3-numpy libprotobuf-lite \
-            libjpeg-turbo libpng libwebp libwebpmux libwebpdemux
-        # ddddocr 1.6.1 起为纯 Python 包（pyproject.toml + setuptools 后端），--no-deps 后仅需 pip/setuptools/wheel
-        # opencv 编译需要 cmake/编译器/python 头文件/numpy 头文件及图像编解码开发库；git 仅构建期克隆源码用
-        $APK_CMD add --update --no-cache --virtual .build_deps py3-pip py3-setuptools py3-wheel \
-            git cmake build-base linux-headers python3-dev py3-numpy-dev \
-            libjpeg-turbo-dev libpng-dev zlib-dev libwebp-dev
-        wget -q -O /tmp/opencv.tar.gz "https://github.com/opencv/opencv/archive/refs/tags/$OPENCV_VERSION.tar.gz"
-        tar -C /tmp -xzf /tmp/opencv.tar.gz
-        # OpenCV 的目标架构必须显式指定，不能让 cmake 从 uname 推断。
-        # 在 GitHub 原生 arm64 runner 上，armv7 容器由内核 compat 模式直接执行（不经 QEMU），
-        # uname -m 返回 aarch64 -> cmake 打印 "Detected processor: aarch64" -> 走进 AARCH64
-        # 分支：用 aarch64 的检查文件喂 arm32 编译器（NEON 测试 Failed），并按 AArch64 配置
-        # NEON_DOTPROD/NEON_BF16 等无效 dispatch。构建能过、冒烟也过，配置却是错的。
-        # 所以下面显式指定处理器，并在 configure 后用断言盯住探测结果。
-        # armv7 的架构探测修正。四种方案实测对比（都记录在这里，避免以后重复踩）：
-        #  1) -DCMAKE_SYSTEM_PROCESSOR=arm          -> 被 cmake 在 project() 里用 uname 覆盖，无效
-        #  2) + -DCMAKE_SYSTEM_NAME=Linux（交叉模式）-> 探测正确，但跳过 OpenCV 的 python3 绑定，
-        #     最终镜像 import cv2 直接 ModuleNotFoundError
-        #  3) setarch linux32                       -> arm64 内核不支持 PER_LINUX32（EINVAL），
-        #     这条路只有 x86_64 上的 setarch i386 可行（内核实现了 uname 覆盖）
-        #  4) 给 cmake 指定一个"说真话的 uname"      -> 有效，且保持原生编译路径
-        # 采用 4)，并用 -DCMAKE_UNAME 显式指定，仅影响这一次 configure，
-        # 不像改 PATH 那样波及后续的 apk/pip/python 断言。
-        cmake_baseline=""
-        if [ -n "${OPENCV_CPU_BASELINE}" ]; then
-            cmake_baseline="-DCPU_BASELINE=${OPENCV_CPU_BASELINE}"
-        fi
-        cmake_uname=""
-        if [ "$TARGETARCH" = "arm" ]; then
-            mkdir -p /tmp/uname-shim
-            printf '#!/bin/sh\n[ "$1" = "-m" ] && { echo armv7l; exit 0; }\nexec /bin/busybox uname "$@"\n' > /tmp/uname-shim/uname
-            chmod +x /tmp/uname-shim/uname
-            cmake_uname="-DCMAKE_UNAME=/tmp/uname-shim/uname"
-        fi
-        case "${TARGETARCH}" in
-            amd64)   cmake_proc=x86_64 ;;
-            arm64)   cmake_proc=aarch64 ;;
-            arm)     cmake_proc=arm ;;   # armv7 走 ARM32 分支（配合上面的 uname shim）
-            386)     cmake_proc=i386 ;;
-            ppc64le) cmake_proc=ppc64le ;;
-            riscv64) cmake_proc=riscv64 ;;
-            loong64) cmake_proc=loongarch64 ;;
-            *) echo "未知 TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;;
-        esac
-        cmake -S "/tmp/opencv-$OPENCV_VERSION" -B /tmp/opencv-build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr \
-            -DCMAKE_SYSTEM_PROCESSOR="${cmake_proc}" ${cmake_uname} ${cmake_baseline} \
-            -DBUILD_LIST=core,imgproc,imgcodecs,python3 \
-            -DBUILD_SHARED_LIBS=ON \
-            -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF \
-            -DWITH_QT=OFF -DWITH_GTK=OFF -DWITH_OPENGL=OFF -DWITH_FFMPEG=OFF \
-            -DWITH_IPP=OFF -DWITH_TBB=OFF -DWITH_OPENCL=OFF -DWITH_CUDA=OFF -DWITH_V4L=OFF \
-            -DBUILD_opencv_python3=ON > /tmp/cmake.log 2>&1 || \
-            { echo "ERROR: cmake configure 失败"; tail -80 /tmp/cmake.log; exit 1; }
-        grep -E "Detected processor|CPU/HW features|Baseline" /tmp/cmake.log
-        # 断言一：cmake 实际采用的处理器必须等于预期（armv7 下应匹配到 armv7l）
-        grep -q "Detected processor: ${cmake_proc}" /tmp/cmake.log || \
-            { echo "ERROR: cmake 探测到的主机架构与目标 ${cmake_proc} 不一致"; grep "Detected processor" /tmp/cmake.log; exit 1; }
-        # 断言二：走对 ARM32 分支后，不应再出现 AArch64 专属的 dispatch 探测
-        # （NEON_DOTPROD/NEON_BF16 只在 AARCH64 分支里被定义）。注意 ARM32 的
-        # "Baseline:" 默认就是空的——NEON 在 armv7 属于可选项，OpenCV 只有显式
-        # -DENABLE_NEON=ON 才加 -mfpu=neon；Alpine 的 armhf 用户态以 armv6 为基线，
-        # 强制 NEON 会让 armv6-only 的板子跑不了 armv7 镜像，故不启用。
-        if [ "$TARGETARCH" = "arm" ]; then
-            ! grep -qE "NEON_DOTPROD|NEON_BF16" /tmp/cmake.log || \
-                { echo "ERROR: armv7 构建仍带 AArch64 专属 dispatch，架构判定有误"; exit 1; }
-        fi
-        cmake --build /tmp/opencv-build -j"$(nproc)"
-        cmake --install /tmp/opencv-build
-        # 删除 ddddocr 用不到的 OpenCV 数据与头文件：haarcascades/lbpcascades 级联 XML 约 9.6MB、头文件约 4.5MB
-        # 注意：只能删 /usr/include/opencv4，不能整个 rm -rf /usr/include——Alpine 3.24 起 pyconfig.h 由
-        # python3 包拥有（属运行时文件，不在 .build_deps 内），删了整个目录会让下游镜像
-        # （如 pycurl-docker）编译任何 C 扩展时都报 missing Python.h，被迫 apk fix python3 兜底
-        rm -rf /usr/share/opencv4 /usr/include/opencv4
-        find /usr/lib -name 'libopencv_*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true
-        find /usr/lib/python3.*/site-packages/cv2 -name '*.so' -exec strip --strip-unneeded {} + 2>/dev/null || true
-        # 清掉构建期辅助物：uname shim（仅 armv7 用）与 configure 日志不该留在最终镜像里
-        rm -rf /tmp/uname-shim /tmp/cmake.log
-        rm -rf /tmp/opencv-build "/tmp/opencv-$OPENCV_VERSION" /tmp/opencv.tar.gz
-        # Pillow 源码构建（--no-binary 强制不用 wheel）。build_deps 里没有 libimagequant-dev，
-        # 所以不会像 Alpine 的 py3-pillow 那样链上 GPL-3 的 libimagequant
-        if [ "x" != "x$PIP_MIRROR" ]; then
-            pip install --index-url "$PIP_MIRROR" --no-cache-dir --no-binary pillow --compile \
-                --break-system-packages "pillow==${PILLOW_VERSION}"
-        else
-            pip install --no-cache-dir --no-binary pillow --compile \
-                --break-system-packages "pillow==${PILLOW_VERSION}"
-        fi
-        # 构建期断言：不能链 libimagequant（GPL-3 义务的判定依据）。
-        # 只能用 features/ldd 判定：C 扩展里始终带着 HAVE_LIBIMAGEQUANT 这类配置字符串，
-        # 用 strings 判会误报（踩过）
-        python3 -c "from PIL import features; assert not features.check('libimagequant'), 'Pillow 链了 libimagequant'"
-        ! ldd /usr/lib/python3.*/site-packages/PIL/_imaging*.so | grep -qi imagequant
-        install_ddddocr
-        # .build_deps 内含 git/cmake/编译器/头文件等构建期工具，构建结束全部卸载（file/magic.mgc 未安装，bash 保留）
-        $APK_CMD del .build_deps
-        # 构建期只断言「产物自洽」，不做行为验证：
-        #   - import 通过 = ddddocr 包确实装上了、onnxruntime/cv2 的依赖链没被
-        #     前面的瘦身步骤（清 sympy/mpmath、apk del .build_deps）弄断
-        #   - pyconfig.h 存活 = 下游镜像能编译 C 扩展
-        # 真实推理属于测试，不在构建期跑：那会把测试塞进构建、混淆「构建失败」与
-        # 「运行时失败」两种信号，也让产物无法在已知运行时损坏时单独构建出来调试。
-        # 推理验证由 CI 的 per-arch 冒烟矩阵执行（tests/smoke.py ocr，覆盖全部
-        # 6 个 OCR 平台），本步骤保持微秒级
-        python3 -c "import ddddocr, onnxruntime, cv2"
-        # 防御性断言：pyconfig.h 必须存活（3.24 起归 python3 包；它是下游镜像编译 C 扩展的前提，
-        # 曾在 2290fdc 清理步骤中被 rm -rf /usr/include 误删，导致 pycurl-docker 需要 apk fix python3 兜底）
-        ls /usr/include/python3.*/pyconfig.h
-        ;;
-    *)
-        # 386/armv6/s390x 缺 py3-onnxruntime，暂无法支持完整 OCR 栈
-        # loong64（龙芯）依赖齐全，但 Docker Hub 官方 alpine 镜像无此变体；
-        # CI 中 loong64 由 Dockerfile.loong64（ghcr.io/loong64/alpine 社区基础镜像）单独构建，不会走到本分支
-        $APK_CMD add --update --no-cache libprotobuf-lite
-        echo "OCR stack (py3-pillow/py3-onnxruntime/opencv) does not currently support ${TARGETPLATFORM}."
-        ;;
-esac
-rm -rf /var/cache/apk/*
-rm -rf /usr/share/man/*
-EOT
+# 编译期依赖：
+#   cmake/build-base/python3-dev —— OpenCV 与 Pillow 的编译
+#   libjpeg-turbo-dev/libpng-dev/zlib-dev/libwebp-dev —— 两者共用的编解码器（同一个库
+#     只装一份，auditwheel 会把它们分别收进 opencv.libs/ 与 pillow.libs/）
+#   patchelf/binutils —— auditwheel 改 RPATH 与 readelf 判定依赖
+#   py3-pip/py3-setuptools/py3-wheel —— 打 wheel 与跑 auditwheel
+RUN apk add --no-cache \
+        binutils \
+        build-base \
+        cmake \
+        git \
+        libjpeg-turbo-dev \
+        libpng-dev \
+        libwebp-dev \
+        linux-headers \
+        patchelf \
+        py3-pip \
+        py3-setuptools \
+        py3-wheel \
+        python3-dev \
+        zlib-dev
+
+RUN set -eux; \
+    if [ -n "${PIP_MIRROR}" ]; then pip_args="-i ${PIP_MIRROR}"; else pip_args=""; fi; \
+    python3 -m pip install --no-cache-dir --break-system-packages \
+        ${pip_args} "auditwheel==${AUDITWHEEL_VERSION}"; \
+    python3 -m auditwheel --version
+
+# OpenCV 的 cmake 要用 numpy 的头文件，所以构建期也得有 numpy。它和运行期同源：
+# 从 onnxruntime 的 wheelhouse 取（六个架构都有 musllinux 轮子，PyPI 没有）。
+RUN --mount=type=bind,from=onnx-wheelhouse,source=/wheels,target=/onnx-wheels \
+    python3 -m pip install --no-cache-dir --break-system-packages \
+        --no-index --find-links /onnx-wheels "numpy==${NUMPY_VERSION}" \
+ && python3 -c "import numpy; print('numpy', numpy.__version__, numpy.get_include())"
+
+# ---- OpenCV ----------------------------------------------------------------
+RUN set -eux; \
+    wget -q -O /tmp/opencv.tar.gz \
+        "https://github.com/opencv/opencv/archive/refs/tags/${OPENCV_VERSION}.tar.gz"; \
+    tar -C /tmp -xzf /tmp/opencv.tar.gz; \
+    rm -f /tmp/opencv.tar.gz
+
+# OpenCV 的目标架构必须显式指定，不能让 cmake 从 uname 推断：
+# 在 GitHub 原生 arm64 runner 上，armv7 容器由内核 compat 模式直接执行（不经 QEMU），
+# uname -m 返回 aarch64 -> cmake 走进 AARCH64 分支，用 aarch64 的检查文件喂 arm32
+# 编译器，还按 AArch64 配置 NEON_DOTPROD/NEON_BF16 等无效 dispatch。构建能过、冒烟
+# 也过，配置却是错的。给 cmake 一个「说真话的 uname」（-DCMAKE_UNAME）只影响这一次
+# configure，不像改 PATH 那样波及后续的 apk/pip。
+#
+# -DCMAKE_INSTALL_RPATH：`libopencv_*.so` 装在 /opt/opencv/lib，不在 musl 的默认搜索
+# 路径上；auditwheel 靠 RPATH 才能定位它们，之后再改写成 $ORIGIN + $ORIGIN/opencv.libs。
+#
+# 两条断言盯住「架构探测到了正确的处理器」：
+#   1) cmake 打印的 Detected processor 必须等于预期（armv7 下应匹配到 armv7l）
+#   2) 走对 ARM32 分支后，不应再出现 AArch64 专属的 dispatch 探测（NEON_DOTPROD /
+#      NEON_BF16 只在 AARCH64 分支里定义）
+RUN set -eux; \
+    cmake_baseline=""; \
+    if [ -n "${OPENCV_CPU_BASELINE}" ]; then \
+        cmake_baseline="-DCPU_BASELINE=${OPENCV_CPU_BASELINE}"; \
+    fi; \
+    cmake_uname=""; \
+    if [ "$TARGETARCH" = "arm" ]; then \
+        mkdir -p /tmp/uname-shim; \
+        printf '#!/bin/sh\n[ "$1" = "-m" ] && { echo armv7l; exit 0; }\nexec /bin/busybox uname "$@"\n' > /tmp/uname-shim/uname; \
+        chmod +x /tmp/uname-shim/uname; \
+        cmake_uname="-DCMAKE_UNAME=/tmp/uname-shim/uname"; \
+    fi; \
+    case "${TARGETARCH}" in \
+        amd64)   cmake_proc=x86_64 ;; \
+        arm64)   cmake_proc=aarch64 ;; \
+        arm)     cmake_proc=arm ;; \
+        ppc64le) cmake_proc=ppc64le ;; \
+        riscv64) cmake_proc=riscv64 ;; \
+        loong64) cmake_proc=loongarch64 ;; \
+        *) echo "错误: 未知 TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    cmake -S "/tmp/opencv-${OPENCV_VERSION}" -B /tmp/opencv-build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/opencv \
+        -DCMAKE_INSTALL_RPATH=/opt/opencv/lib \
+        -DCMAKE_SYSTEM_PROCESSOR="${cmake_proc}" ${cmake_uname} ${cmake_baseline} \
+        -DBUILD_LIST=core,imgproc,imgcodecs,python3 \
+        -DBUILD_SHARED_LIBS=ON \
+        -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF \
+        -DWITH_QT=OFF -DWITH_GTK=OFF -DWITH_OPENGL=OFF -DWITH_FFMPEG=OFF \
+        -DWITH_IPP=OFF -DWITH_TBB=OFF -DWITH_OPENCL=OFF -DWITH_CUDA=OFF -DWITH_V4L=OFF \
+        -DBUILD_opencv_python3=ON > /tmp/cmake.log 2>&1 || \
+        { echo "错误: cmake configure 失败"; tail -80 /tmp/cmake.log; exit 1; }; \
+    grep -E "Detected processor|CPU/HW features|Baseline" /tmp/cmake.log; \
+    grep -q "Detected processor: ${cmake_proc}" /tmp/cmake.log || \
+        { echo "错误: cmake 探测到的主机架构与目标 ${cmake_proc} 不一致"; \
+          grep "Detected processor" /tmp/cmake.log; exit 1; }; \
+    if [ "$TARGETARCH" = "arm" ]; then \
+        ! grep -qE "NEON_DOTPROD|NEON_BF16" /tmp/cmake.log || \
+            { echo "错误: armv7 构建仍带 AArch64 专属 dispatch，架构判定有误"; exit 1; }; \
+    fi; \
+    cmake --build /tmp/opencv-build -j"$(nproc)"; \
+    cmake --install /tmp/opencv-build; \
+    rm -rf /opt/opencv/share /opt/opencv/include; \
+    find /opt/opencv -name '*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true; \
+    rm -rf /tmp/uname-shim /tmp/cmake.log /tmp/opencv-build "/tmp/opencv-${OPENCV_VERSION}"
+
+
+# ---- Pillow ----------------------------------------------------------------
+# --no-binary 强制从源码构建：build_deps 里没有 libimagequant-dev，就不会像 Alpine 的
+# py3-pillow 那样链上 GPL-3.0 的 libimagequant。只开验证码用得到的格式（jpeg/png/webp），
+# 不装 tiff/freetype/lcms2。
+#
+# 用默认的 build isolation：Pillow 13 的构建后端依赖 pybind11，装在隔离环境里比往镜像
+# 里塞一份编译期依赖干净（镜像里那套是给 auditwheel 用的，与 Pillow 无关）。
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64|arm64|arm|ppc64le|riscv64|loong64) : ;; \
+        *) echo "错误: 未知 TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    if [ -n "${PIP_MIRROR}" ]; then pip_args="--index-url ${PIP_MIRROR}"; else pip_args=""; fi; \
+    python3 -m pip wheel ${pip_args} --no-cache-dir \
+        --no-binary :all: --no-deps \
+        --wheel-dir /tmp/pillow-wheel "pillow==${PILLOW_VERSION}"; \
+    ls -l /tmp/pillow-wheel
+
+# ---- ddddocr 源码 ----------------------------------------------------------
+# 支持 分支名/tag/SHA。tag 发布时 CI 传 ddddocr.version 里锁定的 commit（可复现），
+# 其余情况跟随上游 master。
+RUN set -eux; \
+    mkdir -p /src; \
+    git init -q /src/ddddocr; \
+    cd /src/ddddocr; \
+    git remote add origin "${GIT_DOMAIN}/sml2h3/ddddocr.git"; \
+    git fetch --depth 1 -q origin "${DDDDOCR_REF}"; \
+    git checkout -q FETCH_HEAD; \
+    git rev-parse HEAD
+
+COPY src/pack_wheel.py /usr/local/bin/pack_wheel.py
+# 系统包清单随 wheelhouse 一起发布：上层照单 apk add 即可，不必各自维护
+COPY system-packages.txt /wheels/system-packages.txt
+
+RUN set -eux; \
+    python3 /usr/local/bin/pack_wheel.py --opencv /opt/opencv \
+        --version "${OPENCV_VERSION}" --out-dir /wheels; \
+    python3 /usr/local/bin/pack_wheel.py \
+        --repair "$(ls /tmp/pillow-wheel/pillow-*.whl)" --out-dir /wheels; \
+    python3 /usr/local/bin/pack_wheel.py --ddddocr /src/ddddocr \
+        --expect-version "${DDDDOCR_VERSION}" --out-dir /wheels; \
+    python3 /usr/local/bin/pack_wheel.py --emit-index --out-dir /wheels; \
+    cd /wheels; \
+    ls -l; \
+    sha256sum ./*.whl > SHA256SUMS; \
+    cat SHA256SUMS
+
+########################################################################
+# wheel 出口：只有 /wheels（CI 用 --output type=local 取出，或打成 <ver>-wheelhouse）
+########################################################################
+FROM scratch AS wheel
+
+COPY --from=build /wheels/ /wheels/
+
+########################################################################
+# 运行时出口
+#
+# 为什么不用 `COPY --from=build /wheels /wheels` + `RUN rm -rf /wheels`：COPY 和 RUN
+# 是两层，删掉的字节仍在下面那层里，镜像照样算进去（这里是 ~87MB 白花）。用 BuildKit
+# 的 bind mount 把 wheelhouse 只挂进这两条 RUN，装完即随 layer 消失，镜像里没有 /wheels。
+########################################################################
+FROM ${BASE_IMAGE} AS runtime
+
+ARG APK_MIRROR=""
+ARG PIP_MIRROR=""
+ARG ONNX_VERSION=1.24.4
+ARG NUMPY_VERSION=2.4.6
+ARG OPENCV_VERSION=4.14.0
+ARG PILLOW_VERSION=13.0.0
+ARG DDDDOCR_VERSION=""
+
+LABEL maintainer="a76yyyy <q981331502@163.com>"
+LABEL org.opencontainers.image.source=https://github.com/qd-today/ddddocr-docker
+
+RUN if [ -n "${APK_MIRROR}" ]; then \
+        sed -i "s|https://dl-cdn.alpinelinux.org|${APK_MIRROR%/}|g" /etc/apk/repositories; \
+    fi \
+ && cat /etc/apk/repositories
+
+# 系统包按 wheelhouse 里的清单装（清单写错会在这里构建失败，不会等到上层才发现）。
+# 清单只有 wheel 真正的运行时依赖：解释器 python3 + libz（musllinux 白名单里只有
+# libc 与 libz，所以 libz 不会被打进 .libs，而 PIL 与 libopencv_imgcodecs 都链了它）。
+# bash / tzdata / ca-certificates / icu-data-en 是本镜像自带的便利项，不属于 wheel
+# 契约，所以不写进清单：icu-data-en 是 onnxruntime 的 libicu 数据文件（ddddocr 的
+# 图像模型用不到，但上层若有字符串算子会需要）。
+# uv 是包管理器（python3 不含 pip），也只是工具，不是运行时依赖。
+RUN --mount=type=bind,from=build,source=/wheels,target=/w \
+    apk add --no-cache $(cat /w/system-packages.txt) bash ca-certificates icu-data-en tzdata uv
+
+# 装包分两步，原因是索引优先级不可依赖：
+#
+# 1) 本仓库和 onnxruntime 的 wheelhouse 里的五个包，**只**从本地取（--no-index）。
+#    不加 --no-index 的话，uv 会把 PyPI 上的同名包排在 file:// 索引之前 —— ddddocr /
+#    Pillow / numpy / onnxruntime 在 PyPI 上都有同版本文件，实测即使
+#    `--index-strategy first-index` 也照样选中 PyPI 那份；而 PyPI 的 ddddocr 元数据要求
+#    `opencv-python-headless`，musl 上没有轮子，构建会退化成源码编译并失败。加 --no-index
+#    后「这五个包一定来自 wheelhouse」是可验证的事实，而不是靠索引顺序的巧合。
+#    --no-deps 只装 wheel 本体，传递依赖交给下一步。
+# 2) onnxruntime / ddddocr 剩下的传递依赖（flatbuffers / packaging / protobuf / sympy）
+#    是纯 python 轮子，各架构都有，走 PyPI。清单写死是有意的：`uv pip check` 会在下一步
+#    立刻断言「依赖是否齐全」，上游加了依赖而清单没跟上就直接让构建失败。
+#
+# `--no-cache` 不是省事，是必须：uv 默认把解压后的包再存一份到 /root/.cache/uv，会原样
+# 进镜像层（实测多出 130MB）。
+#
+# 清理 sympy / mpmath：onnxruntime 只用它们做符号形状推断，ddddocr 不用。放在同一条
+# RUN 里删，才不会被下面那层留住。
+RUN --mount=type=bind,from=build,source=/wheels,target=/wheels \
+    --mount=type=bind,from=onnx-wheelhouse,source=/wheels,target=/w \
+    set -eux; \
+    ddddocr_req="ddddocr"; \
+    if [ -n "${DDDDOCR_VERSION}" ]; then ddddocr_req="ddddocr==${DDDDOCR_VERSION}"; fi; \
+    pypi="${PIP_MIRROR:-https://pypi.org/simple}"; \
+    uv pip install --system --break-system-packages --no-cache --no-deps \
+        --no-index --find-links /wheels --find-links /w \
+        "${ddddocr_req}" \
+        "opencv==${OPENCV_VERSION}" \
+        "pillow==${PILLOW_VERSION}" \
+        "onnxruntime==${ONNX_VERSION}" \
+        "numpy==${NUMPY_VERSION}"; \
+    uv pip install --system --break-system-packages --no-cache \
+        --index-url "${pypi}" flatbuffers packaging protobuf sympy; \
+    uv pip check --system; \
+    site="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    rm -rf "${site}"/sympy* "${site}"/mpmath* "${site}"/isympy.py "${site}"/numpy/tests; \
+    rm -rf /root/.cache/uv /tmp/uv-*; \
+    python3 -c "import ddddocr, cv2, onnxruntime, numpy; \
+print('cv2', cv2.__version__, '| onnxruntime', onnxruntime.__version__, '| numpy', numpy.__version__)"
+
+# runtime 是给上层 FROM 的基座；`docker run <image>` 打一次自检
+CMD ["python3", "-c", "import ddddocr, cv2, onnxruntime; print('ddddocr ready | cv2', cv2.__version__, '| onnxruntime', onnxruntime.__version__)"]
