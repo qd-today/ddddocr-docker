@@ -65,6 +65,17 @@ def dddocr_ref() -> str:
     return (os.environ.get("DDDDOCR_REF_INPUT") or "").strip() or "master"
 
 
+def dddocr_version() -> str:
+    """镜像 tag 与 wheel 版本断言都用它，只有一个来源：
+
+    * tag 推送 -> tag 名（发布 1.6.2 就是 1.6.2，不会因为输入默认值写成 1.6.1）
+    * workflow_dispatch -> 输入（默认 1.6.1）
+    """
+    if os.environ.get("REF", "").startswith("refs/tags/"):
+        return os.environ["REF_NAME"]
+    return (os.environ.get("DDDDOCR_VERSION_INPUT") or "").strip() or "1.6.1"
+
+
 def entry(platform: str) -> dict:
     """一个平台一个 job，一个 job 里连着构建两个出口（build 阶段共享，不重复编译）：
     单平台 push-by-digest 得到的是单平台 manifest digest，发布时按平台逐一合并，
@@ -85,3 +96,4 @@ print("smoke_matrix=" + json.dumps({"include": include}))
 print("expected=" + ",".join(sorted(plats)))
 print("full=%s" % str(sorted(plats) == sorted(default)).lower())
 print("ddddocr_ref=" + dddocr_ref())
+print("version=" + dddocr_version())

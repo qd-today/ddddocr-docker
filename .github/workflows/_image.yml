@@ -108,6 +108,7 @@ jobs:
       expected: ${{ steps.plan.outputs.expected }}
       full: ${{ steps.plan.outputs.full }}
       dddocr_ref: ${{ steps.plan.outputs.dddocr_ref }}
+      version: ${{ steps.plan.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -119,7 +120,9 @@ jobs:
           ALPINE: ${{ inputs.alpine_version }}
           LOONG64_BASE: ${{ env.LOONG64_BASE }}
           REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
           DDDDOCR_REF_INPUT: ${{ inputs.dddocr_ref }}
+          DDDDOCR_VERSION_INPUT: ${{ inputs.dddocr_version }}
         run: |
           # 矩阵逻辑在 .github/workflows/scripts/plan.py，这里只负责落到 $GITHUB_OUTPUT
           set -euo pipefail
@@ -180,7 +183,7 @@ jobs:
           ONNX_VERSION: ${{ inputs.onnx_version }}
           NUMPY_VERSION: ${{ inputs.numpy_version }}
           DDDDOCR_REF: ${{ needs.plan.outputs.dddocr_ref }}
-          DDDDOCR_VERSION: ${{ inputs.dddocr_version }}
+          DDDDOCR_VERSION: ${{ needs.plan.outputs.version }}
           APK_MIRROR: ${{ inputs.apk_mirror }}
           PIP_MIRROR: ${{ inputs.pip_mirror }}
         run: bash .github/workflows/scripts/build_args.sh
@@ -299,7 +302,7 @@ jobs:
           ONNX_VERSION: ${{ inputs.onnx_version }}
           NUMPY_VERSION: ${{ inputs.numpy_version }}
           DDDDOCR_REF: ${{ needs.plan.outputs.dddocr_ref }}
-          DDDDOCR_VERSION: ${{ inputs.dddocr_version }}
+          DDDDOCR_VERSION: ${{ needs.plan.outputs.version }}
           APK_MIRROR: ${{ inputs.apk_mirror }}
           PIP_MIRROR: ${{ inputs.pip_mirror }}
         run: bash .github/workflows/scripts/build_args.sh
@@ -339,7 +342,7 @@ jobs:
       - name: Run smoke
         env:
           PLATFORM: ${{ matrix.platform }}
-          VERSION: ${{ inputs.dddocr_version }}
+          VERSION: ${{ needs.plan.outputs.version }}
         # smoke.py 会验：环境架构、无 wheel 残留、cv2/PIL 的 ldd、Pillow 契约、
         # protobuf 来源、3 个产物的 ELF 架构、一次真实识别
         run: |
@@ -407,7 +410,7 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
       - name: Create multi-arch manifests
         env:
-          VERSION: ${{ inputs.dddocr_version }}
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
           # 两个出口各自合并，绝不混在一起：wheelhouse 是 scratch + /wheels，
@@ -427,7 +430,8 @@ jobs:
             done
           }
 
-          # tag 命名是确定性的（版本号来自输入，与 Dockerfile 的 DDDDOCR_VERSION 同源）：
+          # tag 命名是确定性的（版本号来自 plan：tag 推送取 tag 名，dispatch 取输入，
+          # 与 Dockerfile 的 DDDDOCR_VERSION 断言同源）：
           #   1.6.1-wheelhouse / wheelhouse  -> wheel 载体（滚动 tag 指向最新 wheelhouse）
           #   1.6.1 / latest                 -> 可运行镜像
           merge_one /tmp/digests/wheelhouse "${VERSION}-wheelhouse" wheelhouse
