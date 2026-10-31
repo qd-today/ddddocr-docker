@@ -25,35 +25,32 @@ docker run --rm -v "$PWD/captcha.png:/c.png" a76yyyy/ddddocr:latest \
 ```
 
 ```dockerfile
-FROM a76yyyy/ddddocr:latest
-```
-
-从 wheelhouse 装到自己的镜像里（需要两个 wheelhouse：本仓库的与 onnxruntime 的）：
-
-```dockerfile
 # syntax=docker/dockerfile:1.7
 FROM alpine:3.24
-RUN --mount=type=bind,from=a76yyyy/ddddocr:1.6.1-wheelhouse,source=/wheels,target=/w1 \
+RUN --mount=type=bind,from=a76yyyy/ddddocr:wheelhouse,source=/wheels,target=/w1 \
     --mount=type=bind,from=a76yyyy/onnxruntime:1.24.4-wheelhouse,source=/wheels,target=/w2 \
     apk add --no-cache $(cat /w1/system-packages.txt) uv && \
     uv pip install --system --break-system-packages --no-cache --no-deps \
         --no-index --find-links /w1 --find-links /w2 \
-        ddddocr opencv Pillow onnxruntime numpy && \
+        "ddddocr==1.6.1" "opencv==4.14.0" "pillow==13.0.0" "onnxruntime==1.24.4" "numpy==2.4.6" && \
     uv pip install --system --break-system-packages --no-cache \
-        flatbuffers packaging protobuf sympy
+        --index-url https://pypi.org/simple flatbuffers packaging protobuf sympy && \
+    uv pip check --system
 ```
 
-三步各有原因：
-
-| 步骤 | 原因 |
+| 写法 | 原因 |
 |---|---|
-| `apk add $(cat /w1/system-packages.txt)` | wheel 只依赖解释器与 `libz`，清单就是全部前置条件 |
-| `--no-index --find-links` + `--no-deps` | uv 把 `file://` 索引排在 PyPI 之后，不加 `--no-index` 会装成 PyPI 的同名包；`--no-deps` 避免解析器去 PyPI 找 opencv |
-| 最后一条装 `flatbuffers/packaging/protobuf/sympy` | onnxruntime 的纯 python 依赖，各架构都有轮子，走 PyPI |
+| `apk add $(cat /w1/system-packages.txt)` | 清单是 wheelhouse 的运行时前置条件（解释器与 `libz`），写错会在这里构建失败 |
+| `--no-index --find-links` | wheelhouse 提供的包**只**从本地取。`--no-index` 让 PyPI 完全不参与，缺件就是构建失败，而不是静默回落到 PyPI 的同名包（PyPI 的 onnxruntime 没有 cp314 的 musllinux 轮子，真回落会在源码编译那步失败，报错还指向别处） |
+| `--no-deps` | 只装 wheel 本体，传递依赖显式列在下一步，不让解析器自己去找 |
+| 第二步走 PyPI | 纯 Python 依赖各架构都有轮子，从 PyPI 取即可 |
+| `uv pip check` | 上游新增依赖而这一步的清单没跟上时，构建直接失败 |
 
-`/w1/simple` 是 PEP 503 索引，链接为相对路径，可与 wheel 目录一起挂到任意位置；需要与
-PyPI 混装时用 `--extra-index-url file:///w1/simple`，但注意上表的优先级问题。
+每个 `--find-links` 给一份 wheelhouse 即可：每个包只属于一个 wheelhouse、版本也钉死，
+不存在歧义。若同一个包出现在多个 wheelhouse 且版本不同，flat 索引没有优先级，那时改用
+PEP 503 索引（`--extra-index-url file:///w1/simple`，按定义顺序查询，第一个含该包的胜出）。
 
+`/w1/simple` 是 PEP 503 索引，链接为相对路径，可与 wheel 目录一起挂到任意位置。
 ## 镜像内容
 
 | 组件 | wheelhouse | runtime |
@@ -90,8 +87,8 @@ alpine 无此架构）。
 
 | 镜像 | 首次拉取 | 占用磁盘 | 容器内 |
 |---|---|---|---|
-| `1.6.1-wheelhouse`（arm64） | 80.9 MiB | 170 MB | 86.7 MiB（三个 wheel） |
-| `1.6.1`（arm64） | 141.1 MiB | 459 MB | 292 MiB（site-packages 208 MiB） |
+| `1.6.1-wheelhouse`（arm64） | 80.9 MiB | 170 MB | 81 MiB（三个 wheel） |
+| `1.6.1`（arm64） | 141.1 MiB | 459 MB | 296 MiB（site-packages 208 MiB） |
 
 `占用磁盘` 取 `docker images` 口径：containerd 计入解压层与压缩 blob 两份。
 
@@ -163,10 +160,13 @@ docker buildx build --platform linux/arm64 --target runtime -t ddddocr:1.6.1 .
   在初始化时用写死的 `cv2` 注册子模块，装成 `cv2/cv2.*.so` 会报
   `Bindings generation error`。因此没有 `cv2.data`（haarcascades 等数据文件），自编时也
   只开了 core / imgproc / imgcodecs，没有 video / photo / dnn。
+  影响面：级联分类器（人脸、眼睛检测）不可用，`cv2.data` 属性不存在，`import cv2.cv2` 不可用；
+  文字识别不依赖这些，ddddocr 自身代码未引用 `cv2.data` 或级联文件。
 - ddddocr wheel 的 `Requires-Dist: opencv-python-headless` 被改写成 `opencv`（上游写死了
   linux 上的包名，本仓库分发的是自编的 `opencv`）。只改这一条。
-- runtime 镜像删除了 `sympy` / `mpmath`：onnxruntime 只用它们做符号形状推断，ddddocr
-  不用。因此 `uv pip check` 在镜像里会报这两项缺失。
+- `sympy` / `mpmath` 保留在镜像里：onnxruntime 的元数据声明了它们，删掉会让 `uv pip check`
+  报缺失（声明与实际不一致）。它们只占纯 Python 的体积，ddddocr 的 OCR 路径不走 onnxruntime
+  的符号形状推断。
 - armv7 上 OpenCV 默认不带 NEON 基线：`--build-arg OPENCV_CPU_BASELINE=NEON` 可开启，
   但镜像会在无 NEON 的 ARMv7（Armada 370、部分 Cortex-A5）上触发 SIGILL，而验证码
   预处理合计不到 1 ms、收益落在推理之外，故不作默认。

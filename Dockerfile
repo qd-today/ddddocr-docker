@@ -275,8 +275,8 @@ RUN --mount=type=bind,from=build,source=/wheels,target=/w \
 # `--no-cache` 不是省事，是必须：uv 默认把解压后的包再存一份到 /root/.cache/uv，会原样
 # 进镜像层（实测多出 130MB）。
 #
-# 清理 sympy / mpmath：onnxruntime 只用它们做符号形状推断，ddddocr 不用。放在同一条
-# RUN 里删，才不会被下面那层留住。
+# sympy / mpmath 保留：onnxruntime 的元数据声明了它们，删掉会让 `uv pip check` 报缺失，
+# 声明与实际不一致。它们只占纯 Python 的体积，不影响 OCR 路径（ddddocr 不走符号形状推断）。
 RUN --mount=type=bind,from=build,source=/wheels,target=/wheels \
     --mount=type=bind,from=onnx-wheelhouse,source=/wheels,target=/w \
     set -eux; \
@@ -294,7 +294,7 @@ RUN --mount=type=bind,from=build,source=/wheels,target=/wheels \
         --index-url "${pypi}" flatbuffers packaging protobuf sympy; \
     uv pip check --system; \
     site="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
-    rm -rf "${site}"/sympy* "${site}"/mpmath* "${site}"/isympy.py "${site}"/numpy/tests; \
+    rm -rf "${site}"/numpy/tests; \
     rm -rf /root/.cache/uv /tmp/uv-*; \
     python3 -c "import ddddocr, cv2, onnxruntime, numpy; \
 print('cv2', cv2.__version__, '| onnxruntime', onnxruntime.__version__, '| numpy', numpy.__version__)"
