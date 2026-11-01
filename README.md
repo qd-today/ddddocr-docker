@@ -156,18 +156,35 @@ docker buildx build --platform linux/arm64 --target runtime -t ddddocr:1.6.1 .
   只开了 core / imgproc / imgcodecs，没有 video / photo / dnn。
   影响面：级联分类器（人脸、眼睛检测）不可用，`cv2.data` 属性不存在，`import cv2.cv2` 不可用；
   文字识别不依赖这些，ddddocr 自身代码未引用 `cv2.data` 或级联文件。
-- 自编 OpenCV 的发行名就是 `opencv-python-headless`（与 PyPI 同名），上游 ddddocr 的
-  `Requires-Dist` 保持原样不改写：依赖名直接命中 wheelhouse 里这份，用户想换回
-  PyPI 版也不必改配置。功能差异是刻意的：只开了 core / imgproc / imgcodecs。
-- `sympy` / `mpmath` 保留在镜像里：onnxruntime 的元数据声明了它们，删掉会让 `uv pip check`
-  报缺失（声明与实际不一致）。它们只占纯 Python 的体积，ddddocr 的 OCR 路径不走 onnxruntime
-  的符号形状推断。
-- armv7 上 OpenCV 默认不带 NEON 基线：`--build-arg OPENCV_CPU_BASELINE=NEON` 可开启，
-  但镜像会在无 NEON 的 ARMv7（Armada 370、部分 Cortex-A5）上触发 SIGILL，而验证码
-  预处理合计不到 1 ms、收益落在推理之外，故不作默认。
-- wheel 的 zip 条目带 mtime，构建不可逐字节复现；内容一致，`sha256` 每次不同。
+- 自编 OpenCV 沿用 `opencv-python-headless` 这个发行名：官方四个包（`opencv-python` /
+  `opencv-contrib-python` / `opencv-python-headless` / `opencv-contrib-python-headless`）
+  里，它是「无 GUI / 无后端」的那一个，正是容器场景要的。
+  **但它不是官方版的等价物**：官方 headless 版是完整模块（video / photo / dnn 等俱全），
+  本仓库只保留 core / imgproc / imgcodecs，也没有 `cv2.data` 的级联文件。
+  发行名保持一致的意义是：用户改从 PyPI 安装同名包，就换回功能完整的官方版，配置不用动。
 
 ## 维护者
+
+<details>
+<summary>版本参数</summary>
+
+上游发新版时，改这里或 dispatch 时传同名输入即可构建新版本；产物版本与传入版本不一致时
+构建失败（`--expect-version` 断言）。
+
+| 参数 | 作用 | 默认值 |
+|---|---|---|
+| `opencv_version` | OpenCV 源码版本（自编最小化 wheel） | 4.14.0 |
+| `pillow_version` | Pillow 源码版本（自编 wheel，不链 libimagequant） | 13.0.0 |
+| `ddddocr_version` | ddddocr 版本，同时是 runtime 镜像的 tag | 跟随 git ref |
+| `ddddocr_ref` | ddddocr 的 git ref（分支 / tag / SHA） | 上游默认分支 |
+| `onnx_version` | onnxruntime 版本，同时决定用哪个 wheelhouse 镜像 | 1.24.4 |
+| `numpy_version` | numpy 版本（由 onnxruntime 的 wheelhouse 提供） | 2.4.6 |
+| `alpine_version` | alpine 版本，决定 Python 小版本与 wheel 的 cpXX tag | 3.24 |
+
+`onnxruntime` 与 `numpy` 来自 Alpine 的 apk 预编译包，版本受 apk 仓限制：参数只能钉住 apk
+里已有的版本，apk 更新后再改这里（版本对不上时构建会在断言处失败，不会产出错标版本的 wheel）。
+
+</details>
 
 <details>
 <summary>CI 结构</summary>
