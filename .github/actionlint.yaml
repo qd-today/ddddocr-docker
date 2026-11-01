@@ -1,0 +1,6 @@
+# actionlint 本地检查用（不进 CI）。配置文件必须放 .github/ 下才会被自动读取。
+# 声明仓库里用到的自建 runner 标签，避免 runner-label 误报。
+self-hosted-runner:
+  labels:
+    - ubuntu-24.04-riscv
+    - ubuntu-24.04-arm

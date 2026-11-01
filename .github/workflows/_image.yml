@@ -91,7 +91,8 @@ on:
 env:
   PUBLISH: ${{ inputs.push || startsWith(github.ref, 'refs/tags/') }}
   IMAGE: docker.io/a76yyyy/ddddocr
-  GHCR_IMAGE: ghcr.io/qd-today/ddddocr
+  # 与仓库同名：ghcr 上只保留同名 package
+  GHCR_IMAGE: ghcr.io/qd-today/ddddocr-docker
   # 默认平台 = 可用平台全集。这 6 个是实测「能自编 OpenCV / Pillow，且
   # a76yyyy/onnxruntime:<ver>-wheelhouse 里有同架构 onnxruntime + numpy」的组合。
   # 刻意不含 386 / arm/v6 / s390x：onnxruntime 在这三个架构上没有可用的 Python 绑定
@@ -117,15 +118,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Lint workflow files
-        run: |
-          set -euo pipefail
-          # GitHub 托管 runner 预装 actionlint；没有就 pip 装一份兜底。
-          if ! command -v actionlint >/dev/null 2>&1; then
-            python3 -m pip install --quiet actionlint-py
-          fi
-          # 自建 runner 的自定义标签 actionlint 不认识，属误报（按消息文本忽略）
-          actionlint -no-color -ignore 'label ".*" is unknown'
       - name: Check version consistency
         run: |
           # 版本号只有一个源头：Dockerfile 的 ARG 默认值。README 里的是它的副本，
@@ -162,6 +154,7 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -449,7 +442,6 @@ jobs:
           password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
       - name: Create multi-arch manifests
         env:
-          GHCR_IMAGE: ghcr.io/qd-today/ddddocr
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
@@ -485,8 +477,7 @@ jobs:
           echo "TAGS=${VERSION}-wheelhouse wheelhouse ${VERSION} latest" >> "$GITHUB_ENV"
       - name: Verify manifest platform completeness
         env:
-          EXPECTED: ${ needs.plan.outputs.expected }
-          GHCR_IMAGE: ghcr.io/qd-today/ddddocr
+          EXPECTED: ${{ needs.plan.outputs.expected }}
         # 合并后回读 manifest：digest 数量对不等于 manifest 里平台对（历史上有过
         # 同一平台被合并两次、另一平台被吞掉的情况），所以按集合比对而不是按数量
         run: |
