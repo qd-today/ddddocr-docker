@@ -34,7 +34,7 @@ RUN --mount=type=bind,from=a76yyyy/ddddocr:wheelhouse,source=/wheels,target=/w1 
         --index-url https://pypi.org/simple \
         --extra-index-url file:///w1/simple \
         --extra-index-url file:///w2/simple \
-        "ddddocr==1.6.1" "opencv-python-headless==4.14.0" "pillow==13.0.0" \
+        "ddddocr==1.6.1" "opencv-python-headless==5.0.0" "pillow==13.0.0" \
         "onnxruntime==1.24.4" "numpy==2.4.6"
 ```
 
@@ -52,7 +52,7 @@ RUN --mount=type=bind,from=a76yyyy/ddddocr:wheelhouse,source=/wheels,target=/w1 
 | 基础镜像 | `scratch` | `alpine:3.24`；loong64 为 `ghcr.io/loong64/alpine:3.24` |
 | Python | — | 3.14 |
 | ddddocr | 1.6.1（`py3-none-any`） | 同左 |
-| OpenCV | 4.14.0（`musllinux_1_2`） | 同左 |
+| OpenCV | 5.0.0（`musllinux_1_2`） | 同左 |
 | Pillow | 13.0.0（`musllinux_1_2`） | 同左 |
 | onnxruntime / numpy | — （在 onnxruntime 的 wheelhouse 里） | 1.24.4 / 2.4.6 |
 | 包管理器 | — | `uv`（python3 不含 pip） |
@@ -100,7 +100,7 @@ runtime 镜像的构成（arm64）：
 
 ```
 ddddocr-1.6.1-py3-none-any.whl                       # 纯 python + 模型文件，与架构无关
-opencv-4.14.0-cp314-cp314-musllinux_1_2_<arch>.whl
+opencv-5.0.0-cp314-cp314-musllinux_1_2_<arch>.whl
 pillow-13.0.0-cp314-cp314-musllinux_1_2_<arch>.whl
 SHA256SUMS
 system-packages.txt
@@ -139,7 +139,7 @@ docker buildx build --platform linux/arm64 --target runtime -t ddddocr:1.6.1 .
 | `BASE_IMAGE` | `alpine:${ALPINE_VERSION}` | loong64 传 `ghcr.io/loong64/alpine:3.24` |
 | `ONNX_WHEELHOUSE` | `a76yyyy/onnxruntime:1.24.4-wheelhouse` | onnxruntime / numpy 的来源 |
 | `ONNX_VERSION` / `NUMPY_VERSION` | `1.24.4` / `2.4.6` | 与上面的 wheelhouse 内容不一致时构建失败 |
-| `OPENCV_VERSION` | `4.14.0` | 源码版本 |
+| `OPENCV_VERSION` | `5.0.0` | 源码版本 |
 | `OPENCV_CPU_BASELINE` | 空 | `NEON` 让 armv7 的 OpenCV 以 NEON 为基线 |
 | `PILLOW_VERSION` | `13.0.0` | 源码版本 |
 | `DDDDOCR_REF` | `master` | ddddocr 的 git ref（分支/tag/SHA） |
@@ -173,7 +173,7 @@ docker buildx build --platform linux/arm64 --target runtime -t ddddocr:1.6.1 .
 
 | 参数 | 作用 | 默认值 |
 |---|---|---|
-| `opencv_version` | OpenCV 源码版本（自编最小化 wheel） | 4.14.0 |
+| `opencv_version` | OpenCV 源码版本（自编最小化 wheel） | 5.0.0 |
 | `pillow_version` | Pillow 源码版本（自编 wheel，不链 libimagequant） | 13.0.0 |
 | `ddddocr_version` | ddddocr 版本，同时是 runtime 镜像的 tag | 跟随 git ref |
 | `ddddocr_ref` | ddddocr 的 git ref（分支 / tag / SHA） | 上游默认分支 |
