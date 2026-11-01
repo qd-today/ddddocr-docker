@@ -118,7 +118,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Lint workflow files
-        uses: rhysd/actionlint@v1
+        run: |
+          set -euo pipefail
+          # GitHub 托管 runner 预装 actionlint；没有就 pip 装一份兜底。
+          if ! command -v actionlint >/dev/null 2>&1; then
+            python3 -m pip install --quiet actionlint-py
+          fi
+          # 自建 runner 的自定义标签 actionlint 不认识，属误报（按消息文本忽略）
+          actionlint -no-color -ignore 'label ".*" is unknown'
       - name: Check version consistency
         run: |
           # 版本号只有一个源头：Dockerfile 的 ARG 默认值。README 里的是它的副本，
