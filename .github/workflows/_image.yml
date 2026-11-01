@@ -179,6 +179,12 @@ jobs:
           registry: docker.io
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_TOKEN || github.actor }}
+          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
       - name: Compute build args
         id: args
         env:
@@ -369,6 +375,7 @@ jobs:
     if: ${{ (inputs.push || startsWith(github.ref, 'refs/tags/')) && !cancelled() && needs.build.result == 'success' && needs.smoke.result == 'success' }}
     permissions:
       contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -416,6 +423,7 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
       - name: Create multi-arch manifests
         env:
+          GHCR_IMAGE: ghcr.io/qd-today/ddddocr
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
@@ -432,6 +440,10 @@ jobs:
             for TAG in "$@"; do
               echo "::group::合并 -> ${IMAGE}:${TAG}"
               docker buildx imagetools create -t "${IMAGE}:${TAG}" $SRCS
+              # 同一批 tag 也挂到 ghcr：两个 registry 内容一致，manifest digest 相同
+              echo "::group::同步 -> ${GHCR_IMAGE}:${TAG}"
+              docker buildx imagetools create -t "${GHCR_IMAGE}:${TAG}" $SRCS
+              echo "::endgroup::"
               echo "::endgroup::"
             done
           }
@@ -445,7 +457,12 @@ jobs:
           echo "TAGS=${VERSION}-wheelhouse wheelhouse ${VERSION} latest" >> "$GITHUB_ENV"
       - name: Verify manifest platform completeness
         env:
-          EXPECTED: ${{ needs.plan.outputs.expected }}
+          EXPECTED: ${ needs.plan.outputs.expected }
+          GHCR_IMAGE: ghcr.io/qd-today/ddddocr
         # 合并后回读 manifest：digest 数量对不等于 manifest 里平台对（历史上有过
         # 同一平台被合并两次、另一平台被吞掉的情况），所以按集合比对而不是按数量
-        run: python3 .github/workflows/scripts/verify_manifests.py
+        run: |
+          set -euo pipefail
+          python3 .github/workflows/scripts/verify_manifests.py
+          # ghcr 上的 manifest 也要验：两个 registry 内容一致，平台集合必须相同
+          IMAGE="$GHCR_IMAGE" python3 .github/workflows/scripts/verify_manifests.py
