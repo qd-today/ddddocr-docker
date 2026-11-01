@@ -89,7 +89,9 @@ on:
         required: false
 
 env:
-  PUBLISH: ${{ inputs.push || startsWith(github.ref, 'refs/tags/') }}
+  # 产物总是推：dev 构建（dispatch 不勾 push）也要产出可拉取的镜像。
+  # 「发不发布」只决定 tag 怎么命名（tag / 版本号 / dev），不再决定推不推。
+  PUBLISH: 'true'
   IMAGE: docker.io/a76yyyy/ddddocr
   # 与仓库同名：ghcr 上只保留同名 package
   GHCR_IMAGE: ghcr.io/qd-today/ddddocr-docker
@@ -385,7 +387,7 @@ jobs:
     timeout-minutes: 30
     # 闸门（fail-closed）：① 有发布意图 ② build 与 smoke 都成功（任何一个失败/取消
     # 都不发布，也不做「部分成功就先发一半」）③ 平台集合完整（见下一步）
-    if: ${{ (inputs.push || startsWith(github.ref, 'refs/tags/')) && !cancelled() && needs.build.result == 'success' && needs.smoke.result == 'success' }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.smoke.result == 'success' }}
     permissions:
       contents: read
       packages: write
@@ -468,13 +470,24 @@ jobs:
             done
           }
 
-          # tag 命名是确定性的（版本号来自 plan：tag 推送取 tag 名，dispatch 取输入，
-          # 与 Dockerfile 的 DDDDOCR_VERSION 断言同源）：
-          #   1.6.1-wheelhouse / wheelhouse  -> wheel 载体（滚动 tag 指向最新 wheelhouse）
-          #   1.6.1 / latest                 -> 可运行镜像
-          merge_one /tmp/digests/wheelhouse "${VERSION}-wheelhouse" wheelhouse
-          merge_one /tmp/digests/runtime    "${VERSION}" latest
-          echo "TAGS=${VERSION}-wheelhouse wheelhouse ${VERSION} latest" >> "$GITHUB_ENV"
+          # tag 命名按模式分三种，避免 dispatch 污染版本 tag：
+          #   tag 推送           -> 版本 tag + 滚动 tag（1.6.1/latest、1.6.1-wheelhouse/wheelhouse）
+          #   dispatch 勾了 push -> 只滚滚动 tag（latest/wheelhouse）
+          #   dispatch 未勾 push -> dev（dev/dev-wheelhouse），给测试用，不碰正式 tag
+          if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
+            RT_TAGS="${VERSION} latest"
+            WH_TAGS="${VERSION}-wheelhouse wheelhouse"
+          elif [ "${{ inputs.push }}" = "true" ]; then
+            RT_TAGS="latest"
+            WH_TAGS="wheelhouse"
+          else
+            RT_TAGS="dev"
+            WH_TAGS="dev-wheelhouse"
+          fi
+          merge_one /tmp/digests/wheelhouse ${WH_TAGS}
+          merge_one /tmp/digests/runtime    ${RT_TAGS}
+          echo "TAGS=${WH_TAGS} ${RT_TAGS}" >> "$GITHUB_ENV"
+          echo "本次产出标签：${WH_TAGS} ${RT_TAGS}"
       - name: Verify manifest platform completeness
         env:
           EXPECTED: ${{ needs.plan.outputs.expected }}

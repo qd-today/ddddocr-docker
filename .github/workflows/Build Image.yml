@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       push:
-        description: '构建并通过冒烟测试后发布到 Docker Hub（不勾选则只构建+冒烟，不发布任何镜像）'
+        description: '勾选=发布滚动/版本标签；不勾选=只产 dev 标签（同样推到两个 registry，供测试拉取）'
         type: boolean
         default: false
       platforms:
