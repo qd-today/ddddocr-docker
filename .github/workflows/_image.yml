@@ -111,7 +111,8 @@ jobs:
     permissions:
       contents: read
     outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
+      wheel_matrix: ${{ steps.plan.outputs.wheel_matrix }}
+      runtime_matrix: ${{ steps.plan.outputs.runtime_matrix }}
       smoke_matrix: ${{ steps.plan.outputs.smoke_matrix }}
       expected: ${{ steps.plan.outputs.expected }}
       full: ${{ steps.plan.outputs.full }}
@@ -142,24 +143,29 @@ jobs:
           set -euo pipefail
           python3 .github/workflows/scripts/plan.py > /tmp/plan.out
           echo "--- 构建矩阵 ---"
-          sed -n 's/^matrix=//p' /tmp/plan.out | python3 -m json.tool
+          echo "--- wheel 矩阵 ---"
+          sed -n 's/^wheel_matrix=//p' /tmp/plan.out | python3 -m json.tool
+          echo "--- runtime 矩阵 ---"
+          sed -n 's/^runtime_matrix=//p' /tmp/plan.out | python3 -m json.tool
           echo "--- 其余 ---"
           grep -Ev '^(matrix|smoke_matrix)=' /tmp/plan.out
           cat /tmp/plan.out >> "$GITHUB_OUTPUT"
 
-  build:
+  # 第一段：编 wheel，产物导出成 artifact。与 pycurl-docker 的 _image.yml 同构。
+  #
+  # 按平台拆 job 是硬约束（--output type=local 不支持多平台），顺带提高并行度。
+  # arm 系列都放原生 arm64：编 wheel 不受 compat 模式影响（tag 由 gcc target 决定），
+  # 但装 wheel 不能在那儿做——见第二段的说明。
+  build-wheel:
     needs: plan
-    name: Build ${{ matrix.platform }}
+    name: Wheel ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
-    # 原生架构编 OpenCV 约 5-10 分钟；QEMU 架构（ppc64le / riscv64 / loong64）要模拟
-    # 整个编译过程，给到 GitHub 单 job 上限附近，避免慢架构被超时误杀
-    timeout-minutes: 360
+    timeout-minutes: 150
     permissions:
       contents: read
-      packages: write
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.wheel_matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -176,11 +182,89 @@ jobs:
           done
           echo "出口 stage 齐全（wheel + runtime）"
       - name: Set up QEMU
-        # 非本机架构（如 ubuntu-latest 上的 riscv64）要靠 binfmt 才能执行 RUN 里的
-        # apk / cmake / python
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+      - name: Compute build args
+        id: args
+        env:
+          BASE_IMAGE: ${{ matrix.base_image }}
+          ALPINE_VERSION: ${{ inputs.alpine_version }}
+          OPENCV_VERSION: ${{ inputs.opencv_version }}
+          PILLOW_VERSION: ${{ inputs.pillow_version }}
+          ONNX_VERSION: ${{ inputs.onnx_version }}
+          NUMPY_VERSION: ${{ inputs.numpy_version }}
+          DDDDOCR_REF: ${{ needs.plan.outputs.dddocr_ref }}
+          DDDDOCR_VERSION: ${{ needs.plan.outputs.version }}
+          APK_MIRROR: ${{ inputs.apk_mirror }}
+          PIP_MIRROR: ${{ inputs.pip_mirror }}
+        run: bash .github/workflows/scripts/build_args.sh
+      - name: Build artifacts
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          # artifacts 出口目前只有 /wheels；两段式的第二段全靠它，不再回头依赖 build stage
+          target: artifacts
+          platforms: ${{ matrix.platform }}
+          outputs: type=local,dest=./dist
+          build-args: ${{ steps.args.outputs.build_args }}
+          provenance: false
+          cache-from: type=gha,scope=ddddocr-${{ matrix.group }}${{ inputs.cache_bust }}
+          cache-to: type=gha,mode=max,scope=ddddocr-${{ matrix.group }}${{ inputs.cache_bust }},ignore-error=true
+      - name: Show artifacts
+        run: |
+          set -euo pipefail
+          ls -l dist/wheels
+          cat dist/wheels/SHA256SUMS
+          echo "--- system-packages.txt ---"
+          cat dist/wheels/system-packages.txt
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.group }}
+          path: dist
+          retention-days: 1
+          if-no-files-found: error
+
+  # 第二段：用第一段的产物组装 wheelhouse 与 runtime，推 digest。
+  #
+  # 统一跑 x86_64。arm64 runner 走内核 compat 模式时 Python 自报 linux-aarch64，
+  # uv 在那装 wheel 会挂死（pycurl-docker 实测：x86_64 上两版 uv 都 1-2 秒通过，
+  # arm64 runner 上两版都超时，只有 pip 能过）。x86_64 + QEMU 下 Python 报
+  # linux-armv7l，与 wheel 的 musllinux_1_2_armv7l 匹配，uv 正常。
+  build:
+    needs: [plan, build-wheel]
+    name: Runtime ${{ matrix.platform }}
+    if: ${{ needs.build-wheel.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.runtime_matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: artifacts-${{ matrix.group }}
+          path: ./dist
+      - name: Guard - dockerfile exposes both exits
+        # 双出口流水线要求 Dockerfile 同时有 `wheel` 与 `runtime` 两个 stage，
+        # 缺一个时 buildx 只会报 "target stage ... could not be found"，看不懂
+        run: |
+          set -euo pipefail
+          for stage in wheel runtime; do
+            if ! grep -qE "^FROM[[:space:]].*[[:space:]]AS[[:space:]]+${stage}[[:space:]]*$" Dockerfile; then
+              echo "::error::Dockerfile 没有 \`AS ${stage}\` 出口 stage，双出口流水线无法构建。"
+              exit 1
+            fi
+          done
+          echo "出口 stage 齐全（wheel + runtime）"
       - name: Login to Docker Hub
         if: env.PUBLISH == 'true'
         uses: docker/login-action@v3
@@ -194,6 +278,10 @@ jobs:
           registry: ghcr.io
           username: ${{ secrets.GHCR_TOKEN || github.actor }}
           password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Compute build args
         id: args
         env:
@@ -214,33 +302,30 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          # 只到 wheel 阶段：产物就是这个 scratch 镜像里的 /wheels
-          target: wheel
+          # 从产物重建 wheelhouse：不再编译，秒级完成
+          target: wheel-from-artifacts
           platforms: ${{ matrix.platform }}
-          # 发布模式按 digest 推送：各平台并行构建，用 digest 传递产物不必协调 tag
-          # 命名，也不在 tag 列表里留下对使用者无意义、却可被拉取的中间产物。
-          # 非发布模式落盘，作为 wheel 产物留给人工取用。
-          # 两个 registry 各推一份 digest：层直接推给 ghcr，publish 阶段才能用
-          # 「各自的 registry 作为源」合并 manifest——跨 registry 复制层会被 ghcr 拒绝。
+          build-contexts: |
+            wheelsrc=./dist
+          # 两个 registry 各推一份 digest：publish 阶段才能用「各自的 registry 作为源」
+          # 合并 manifest——跨 registry 复制层会被 ghcr 拒绝
           outputs: |
-            ${{ env.PUBLISH == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) || 'type=local,dest=./dist' }}
-            ${{ env.PUBLISH == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.GHCR_IMAGE) || 'type=local,dest=./dist-ghcr' }}
+            ${{ format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) }}
+            ${{ format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.GHCR_IMAGE) }}
           build-args: ${{ steps.args.outputs.build_args }}
-          # 不产 attestation 清单，保持 manifest 只有平台条目（旧客户端兼容）
           provenance: false
           cache-from: type=gha,scope=ddddocr-${{ matrix.group }}${{ inputs.cache_bust }}
-          cache-to: type=gha,mode=max,scope=ddddocr-${{ matrix.group }}${{ inputs.cache_bust }},ignore-error=true
+          cache-to: type=gha,mode=max,scope=ddddocr-${{ matrix.group }}-runtime${{ inputs.cache_bust }},ignore-error=true
       - name: Build runtime image
-        if: env.PUBLISH == 'true'
         id: runtime
-        # 发布模式才在这里构建：非发布模式下冒烟 job 会自己 `--load` 出来跑，
-        # 避免同一台 runner 上编两遍（build 阶段仍然从缓存命中）
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           target: runtime
           platforms: ${{ matrix.platform }}
+          build-contexts: |
+            wheelsrc=./dist
           outputs: |
             ${{ format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) }}
             ${{ format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.GHCR_IMAGE) }}
@@ -250,19 +335,8 @@ jobs:
             type=gha,scope=ddddocr-${{ matrix.group }}${{ inputs.cache_bust }}
             type=gha,scope=ddddocr-${{ matrix.group }}-runtime${{ inputs.cache_bust }}
           cache-to: type=gha,mode=max,scope=ddddocr-${{ matrix.group }}-runtime${{ inputs.cache_bust }},ignore-error=true
-      - name: Show wheel
-        if: env.PUBLISH != 'true'
-        # 顺带把 SHA256SUMS 与 system-packages.txt 打进日志：artifact 里存的就是这份
-        # 内容，出问题时可追溯
-        run: |
-          ls -l dist/wheels
-          cat dist/wheels/SHA256SUMS
-          echo "--- system-packages.txt ---"
-          cat dist/wheels/system-packages.txt
       - name: Export digests
-        if: env.PUBLISH == 'true'
-        # 两个出口各一个 digest，分开目录存放，artifact 名也带出口名，
-        # 下游 publish 才能把两套 manifest 各自的 6 个 digest 分清楚
+        # 两个出口各一个 digest，分开目录存放，下游 publish 才能把两套 manifest 分清
         run: |
           set -eu
           mkdir -p /tmp/digests/wheelhouse /tmp/digests/runtime
@@ -271,7 +345,6 @@ jobs:
           echo "wheelhouse ${{ matrix.group }}: $(cat "/tmp/digests/wheelhouse/${{ matrix.group }}.digest")"
           echo "runtime    ${{ matrix.group }}: $(cat "/tmp/digests/runtime/${{ matrix.group }}.digest")"
       - name: Upload wheelhouse digest
-        if: env.PUBLISH == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: digest-wheelhouse-${{ matrix.group }}
@@ -279,20 +352,10 @@ jobs:
           retention-days: 1
           if-no-files-found: error
       - name: Upload runtime digest
-        if: env.PUBLISH == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: digest-runtime-${{ matrix.group }}
           path: /tmp/digests/runtime/*.digest
-          retention-days: 1
-          if-no-files-found: error
-      - name: Upload wheel
-        if: env.PUBLISH != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          # artifact 名带平台，避免多平台互相覆盖
-          name: wheel-${{ matrix.group }}
-          path: dist/wheels
           retention-days: 1
           if-no-files-found: error
 

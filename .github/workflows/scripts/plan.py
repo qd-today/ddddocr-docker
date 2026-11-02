@@ -35,8 +35,13 @@ dup = sorted({p for p in plats if plats.count(p) > 1})
 if dup:
     sys.exit("::error::平台重复: %s" % ",".join(dup))
 
+# 默认启用原生 arm64 runner，与 pycurl-docker 的判定一致（那里是 != "false"）。
+# 原来写的是 == "true"，而没有任何地方传 NATIVE_ARM，等于 arm 构建一直跑在 x86_64 上
+# 靠 QEMU 模拟。要临时退回 QEMU 时设 NATIVE_ARM=false。
 arm_runner = (
-    "ubuntu-24.04-arm" if os.environ.get("NATIVE_ARM") == "true" else "ubuntu-latest"
+    "ubuntu-latest"
+    if os.environ.get("NATIVE_ARM") == "false"
+    else "ubuntu-24.04-arm"
 )
 
 # wheel 文件名里的架构串（与 auditwheel 产出的 musllinux_1_2_<arch> 对齐）
@@ -76,23 +81,39 @@ def dddocr_version() -> str:
     return (os.environ.get("DDDDOCR_VERSION_INPUT") or "").strip() or "1.6.1"
 
 
-def entry(platform: str) -> dict:
-    """一个平台一个 job，一个 job 里连着构建两个出口（build 阶段共享，不重复编译）：
-    单平台 push-by-digest 得到的是单平台 manifest digest，发布时按平台逐一合并，
-    冒烟也能按 digest 取回同一份字节。"""
+def wheel_entry(platform: str) -> dict:
+    """第一段：编 wheel，跑在编译最快的 runner 上。
+
+    arm 系列都放原生 arm64 —— armv7 在那儿由内核 compat 模式执行，编 wheel 没问题
+    （wheel 的 tag 由 setuptools/auditwheel 按 gcc target 生成，是 armv7l；Python 自报
+    aarch64 只影响运行时判断）。但**装** wheel 不能在那儿做：compat 模式下 Python 自报
+    linux-aarch64，uv 会挂死（pycurl-docker 实测过，x86_64 上两版 uv 都 1-2 秒通过、
+    arm64 runner 上两版都超时）。所以安装统一放到第二段的 x86_64 上。
+    """
     return {
         "platform": platform,
         "group": platform.replace("linux/", "").replace("/", "-"),
         "arch": arch_map[platform],
-        "runner": arm_runner if platform == "linux/arm64" else "ubuntu-latest",
+        "runner": arm_runner
+        if platform in ("linux/arm64", "linux/arm/v7")
+        else "ubuntu-latest",
         "base_image": base_of(platform),
     }
 
 
-include = [entry(p) for p in plats]
+def runtime_entry(platform: str) -> dict:
+    """第二段：用第一段的产物组装 wheelhouse 与 runtime，统一跑 x86_64。"""
+    e = wheel_entry(platform)
+    e["runner"] = "ubuntu-latest"
+    return e
 
-print("matrix=" + json.dumps({"include": include}))
-print("smoke_matrix=" + json.dumps({"include": include}))
+
+wheel_matrix = [wheel_entry(p) for p in plats]
+runtime_matrix = [runtime_entry(p) for p in plats]
+
+print("wheel_matrix=" + json.dumps({"include": wheel_matrix}))
+print("runtime_matrix=" + json.dumps({"include": runtime_matrix}))
+print("smoke_matrix=" + json.dumps({"include": wheel_matrix}))
 print("expected=" + ",".join(sorted(plats)))
 print("full=%s" % str(sorted(plats) == sorted(default)).lower())
 print("ddddocr_ref=" + dddocr_ref())

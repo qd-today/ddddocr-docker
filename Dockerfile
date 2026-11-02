@@ -225,6 +225,30 @@ FROM scratch AS wheel
 COPY --from=build /wheels/ /wheels/
 
 ########################################################################
+# 编译产物（两段式构建的第一段导出物）
+#
+# 与 pycurl-docker 的 Dockerfile 同构：wheel 的构建与 runtime 的组装分在两个 runner 上。
+# 本仓库的 runtime 不需要额外二进制（没有 curl 命令行那种东西），所以产物只有 /wheels。
+#
+#   docker buildx build --target artifacts --output type=local,dest=dist .
+########################################################################
+FROM scratch AS artifacts
+
+COPY --from=build /wheels/ /wheels/
+
+########################################################################
+# 外部产物注入点（--build-context wheelsrc=<dist>）
+########################################################################
+FROM scratch AS wheelsrc
+
+########################################################################
+# 从产物构造 wheelhouse 镜像（两段式的第二段，不需要重新编译）
+########################################################################
+FROM scratch AS wheel-from-artifacts
+
+COPY --from=wheelsrc /wheels /wheels
+
+########################################################################
 # 运行时出口
 #
 # 为什么不用 `COPY --from=build /wheels /wheels` + `RUN rm -rf /wheels`：COPY 和 RUN
@@ -255,8 +279,9 @@ RUN if [ -n "${APK_MIRROR}" ]; then \
 # bash / tzdata / ca-certificates / icu-data-en 是本镜像自带的便利项，不属于 wheel
 # 契约，所以不写进清单：icu-data-en 是 onnxruntime 的 libicu 数据文件（ddddocr 的
 # 图像模型用不到，但上层若有字符串算子会需要）。
-# uv 是包管理器（python3 不含 pip），也只是工具，不是运行时依赖。
-RUN --mount=type=bind,from=build,source=/wheels,target=/w \
+# uv 是包管理器（python3 不含 pip），也只是工具不是运行时依赖：装完包就在同一个 RUN 里
+# 删掉。它是 27 MiB 的独立二进制，留着白占体积；分成两层删除无效（删掉的字节仍留在下层）。
+RUN --mount=type=bind,from=wheelsrc,source=wheels,target=/w \
     apk add --no-cache $(cat /w/system-packages.txt) bash ca-certificates icu-data-en tzdata uv
 
 # 装包：本地 wheelhouse 的索引优先，PyPI 兜底纯 Python 依赖。
@@ -271,7 +296,7 @@ RUN --mount=type=bind,from=build,source=/wheels,target=/w \
 #
 # `--no-cache` 不是省事，是必须：uv 默认把解压后的包再存一份到 /root/.cache/uv，会原样
 # 进镜像层（实测多出 130MB）。
-RUN --mount=type=bind,from=build,source=/wheels,target=/wheels \
+RUN --mount=type=bind,from=wheelsrc,source=wheels,target=/wheels \
     --mount=type=bind,from=onnx-wheelhouse,source=/wheels,target=/w \
     set -eux; \
     ddddocr_req="ddddocr"; \
@@ -291,7 +316,8 @@ RUN --mount=type=bind,from=build,source=/wheels,target=/wheels \
     rm -rf "${site}"/numpy/tests; \
     rm -rf /root/.cache/uv /tmp/uv-*; \
     python3 -c "import ddddocr, cv2, onnxruntime, numpy; \
-print('cv2', cv2.__version__, '| onnxruntime', onnxruntime.__version__, '| numpy', numpy.__version__)"
+print('cv2', cv2.__version__, '| onnxruntime', onnxruntime.__version__, '| numpy', numpy.__version__)"; \
+    apk del uv
 
 # runtime 是给上层 FROM 的基座；`docker run <image>` 打一次自检
 CMD ["python3", "-c", "import ddddocr, cv2, onnxruntime; print('ddddocr ready | cv2', cv2.__version__, '| onnxruntime', onnxruntime.__version__)"]
