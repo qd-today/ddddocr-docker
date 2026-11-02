@@ -80,6 +80,27 @@ def dddocr_version() -> str:
         return os.environ["REF_NAME"]
     return (os.environ.get("DDDDOCR_VERSION_INPUT") or "").strip() or "1.6.1"
 
+def python_host_platform(platform: str) -> str:
+    """Python 的 platform tag（sysconfig.get_platform() 的格式）。
+
+    为什么要显式给：arm 容器在原生 arm64 runner 上走内核 compat 模式时，uname 报
+    aarch64，Python 的 sysconfig.get_platform() 与 EXT_SUFFIX 都跟着错成 aarch64。
+    后果有两处——cmake 生成的扩展模块名错、auditwheel 也会因 .so 与标签不符失败。
+    _PYTHON_HOST_PLATFORM 是 Python 官方认的覆盖方式（sysconfig 与 distutils 都优先
+    读它），由 CI 按平台算好、经 build-arg 传进 Dockerfile 的 ENV，全程生效。
+    """
+    return {
+        "linux/amd64": "linux-x86_64",
+        "linux/386": "linux-i686",
+        "linux/arm64": "linux-aarch64",
+        "linux/arm/v7": "linux-armv7l",
+        "linux/arm/v6": "linux-armv6l",
+        "linux/ppc64le": "linux-ppc64le",
+        "linux/riscv64": "linux-riscv64",
+        "linux/s390x": "linux-s390x",
+        "linux/loong64": "linux-loongarch64",
+    }[platform]
+
 
 def wheel_entry(platform: str) -> dict:
     """第一段：编 wheel，跑在编译最快的 runner 上。
@@ -98,6 +119,7 @@ def wheel_entry(platform: str) -> dict:
         if platform in ("linux/arm64", "linux/arm/v7")
         else "ubuntu-latest",
         "base_image": base_of(platform),
+        "python_host_platform": python_host_platform(platform),
     }
 
 
