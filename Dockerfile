@@ -205,6 +205,23 @@ COPY src/pack_wheel.py /usr/local/bin/pack_wheel.py
 COPY system-packages.txt /wheels/system-packages.txt
 
 RUN set -eux; \
+    # Python 的 sysconfig.get_platform() 读的是运行时 uname，而 arm 容器在原生 arm64
+    # runner 上走内核 compat 模式时 uname 报 aarch64，会让 arm32 的 wheel 被标成
+    # linux_aarch64（auditwheel 随即因 .so 与标签不符失败）。_PYTHON_HOST_PLATFORM 是
+    # Python 官方认的覆盖方式（sysconfig 与 distutils 都优先读它），这里按 Docker 提供的
+    # 目标平台参数推导，不硬编码单个架构、也不依赖运行时探测。
+    case "${TARGETARCH}${TARGETVARIANT:+/$TARGETVARIANT}" in \
+        arm64)   _PYTHON_HOST_PLATFORM=linux-aarch64 ;; \
+        arm/v7)  _PYTHON_HOST_PLATFORM=linux-armv7l ;; \
+        arm/v6)  _PYTHON_HOST_PLATFORM=linux-armv6l ;; \
+        amd64)   _PYTHON_HOST_PLATFORM=linux-x86_64 ;; \
+        386)     _PYTHON_HOST_PLATFORM=linux-i686 ;; \
+        ppc64le) _PYTHON_HOST_PLATFORM=linux-ppc64le ;; \
+        riscv64) _PYTHON_HOST_PLATFORM=linux-riscv64 ;; \
+        s390x)   _PYTHON_HOST_PLATFORM=linux-s390x ;; \
+        loong64) _PYTHON_HOST_PLATFORM=linux-loongarch64 ;; \
+    esac; \
+    export _PYTHON_HOST_PLATFORM; \
     python3 /usr/local/bin/pack_wheel.py --opencv /opt/opencv \
         --version "${OPENCV_VERSION}" --out-dir /wheels; \
     python3 /usr/local/bin/pack_wheel.py \
