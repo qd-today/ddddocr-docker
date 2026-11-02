@@ -94,9 +94,7 @@ def wheel_entry(platform: str) -> dict:
         "platform": platform,
         "group": platform.replace("linux/", "").replace("/", "-"),
         "arch": arch_map[platform],
-        "runner": arm_runner
-        if platform in ("linux/arm64", "linux/arm/v7")
-        else "ubuntu-latest",
+        "runner": arm_runner if platform == "linux/arm64" else "ubuntu-latest",
         "base_image": base_of(platform),
     }
 
