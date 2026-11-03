@@ -152,7 +152,12 @@ RUN set -eux; \
         amd64)   cmake_proc=x86_64 ;; \
         arm64)   cmake_proc=aarch64 ;; \
         arm)     cmake_proc=arm ;; \
-        ppc64le) cmake_proc=ppc64le ;; \
+        ppc64le) cmake_proc=ppc64le; \
+            # OpenCV 5.0.0 的通用 SIMD 层在 VSX 上有回归：warp_kernels.simd.hpp 里
+            # v_fma 不接受 int32、addr_1 未声明，而 ppc64le 的默认 CPU_BASELINE 正是
+            # VSX（OpenCVCompilerOptimizations.cmake）。退回标量实现才能编过。
+            # 4.14.0 没有这个回归；等 5.0.x 修复后可撤掉。
+            [ -n "${cmake_baseline}" ] || cmake_baseline="-DCPU_BASELINE=NONE -DCPU_DISPATCH=" ;; \
         riscv64) cmake_proc=riscv64 ;; \
         loong64) cmake_proc=loongarch64 ;; \
         *) echo "错误: 未知 TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
