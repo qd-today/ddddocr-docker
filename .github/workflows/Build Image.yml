@@ -42,7 +42,7 @@ on:
       opencv_version:
         description: 'OpenCV 源码版本（自编最小化 wheel：core/imgproc/imgcodecs）'
         type: string
-        default: '4.14.0'
+        default: '5.0.0'
       pillow_version:
         description: 'Pillow 源码版本（自编 wheel，不链 libimagequant）'
         type: string
@@ -82,7 +82,7 @@ jobs:
       apk_mirror: ${{ github.event.inputs.apk_mirror || '' }}
       pip_mirror: ${{ github.event.inputs.pip_mirror || '' }}
       alpine_version: ${{ github.event.inputs.alpine_version || '3.24' }}
-      opencv_version: ${{ github.event.inputs.opencv_version || '4.14.0' }}
+      opencv_version: ${{ github.event.inputs.opencv_version || '5.0.0' }}
       pillow_version: ${{ github.event.inputs.pillow_version || '13.0.0' }}
       onnx_version: ${{ github.event.inputs.onnx_version || '1.24.4' }}
       numpy_version: ${{ github.event.inputs.numpy_version || '2.4.6' }}
