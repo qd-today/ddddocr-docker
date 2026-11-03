@@ -58,6 +58,11 @@ ARG GIT_DOMAIN=https://github.com
 ARG DDDDOCR_REF=master
 ARG DDDDOCR_VERSION=""
 ARG OPENCV_VERSION=5.0.0
+# wheel 里的 Version 字段跟随 PyPI 的 opencv-python-headless：OpenCV 的 Python 包
+# 版本号是「<上游版本>.<构建号>」，PyPI 上是 5.0.0.93。下游（qd）用 uv lock 解析
+# 依赖时只能看到 PyPI 的版本号，wheelhouse 若标成 5.0.0 就永远对不上，sync 会失败。
+# 源码 tag 仍是 5.0.0，两者刻意分开。
+ARG OPENCV_WHEEL_VERSION=5.0.0.93
 # OpenCV 的 CPU 基线优化开关（opt-in，留空 = OpenCV 默认行为）。
 # 仅 armv7 有意义：ARM32 上 NEON 是可选扩展，OpenCV 默认不启用（Baseline 为空）。
 ARG OPENCV_CPU_BASELINE=""
@@ -215,7 +220,7 @@ COPY system-packages.txt /wheels/system-packages.txt
 
 RUN set -eux; \
     python3 /usr/local/bin/pack_wheel.py --opencv /opt/opencv \
-        --version "${OPENCV_VERSION}" --out-dir /wheels; \
+        --version "${OPENCV_WHEEL_VERSION}" --out-dir /wheels; \
     python3 /usr/local/bin/pack_wheel.py \
         --repair "$(ls /tmp/pillow-wheel/pillow-*.whl)" --out-dir /wheels; \
     python3 /usr/local/bin/pack_wheel.py --ddddocr /src/ddddocr \
@@ -271,6 +276,11 @@ ARG PIP_MIRROR=""
 ARG ONNX_VERSION=1.24.4
 ARG NUMPY_VERSION=2.4.6
 ARG OPENCV_VERSION=5.0.0
+# wheel 里的 Version 字段跟随 PyPI 的 opencv-python-headless：OpenCV 的 Python 包
+# 版本号是「<上游版本>.<构建号>」，PyPI 上是 5.0.0.93。下游（qd）用 uv lock 解析
+# 依赖时只能看到 PyPI 的版本号，wheelhouse 若标成 5.0.0 就永远对不上，sync 会失败。
+# 源码 tag 仍是 5.0.0，两者刻意分开。
+ARG OPENCV_WHEEL_VERSION=5.0.0.93
 ARG PILLOW_VERSION=13.0.0
 ARG DDDDOCR_VERSION=""
 
@@ -316,7 +326,7 @@ RUN --mount=type=bind,from=wheelsrc,source=wheels,target=/wheels \
         --extra-index-url file:///wheels/simple \
         --extra-index-url file:///w/simple \
         "${ddddocr_req}" \
-        "opencv-python-headless==${OPENCV_VERSION}" \
+        "opencv-python-headless==${OPENCV_WHEEL_VERSION}" \
         "pillow==${PILLOW_VERSION}" \
         "onnxruntime==${ONNX_VERSION}" \
         "numpy==${NUMPY_VERSION}"; \
