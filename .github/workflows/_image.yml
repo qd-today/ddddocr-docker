@@ -244,7 +244,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
-      contents: write      # 上传 Release 资产
+      contents: read
       packages: write
     strategy:
       fail-fast: false
@@ -458,7 +458,7 @@ jobs:
     # 都不发布，也不做「部分成功就先发一半」）③ 平台集合完整（见下一步）
     if: ${{ !cancelled() && needs.build.result == 'success' && needs.smoke.result == 'success' }}
     permissions:
-      contents: read
+      contents: write      # 上传 Release 资产
       packages: write
     steps:
       - name: Checkout
