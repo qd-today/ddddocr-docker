@@ -79,8 +79,9 @@ alpine 无此架构）。
 | `<ver>-wheelhouse` | `scratch` + `/wheels`：三个 wheel、`SHA256SUMS`、`system-packages.txt`、PEP 503 索引 |
 | `<ver>` | `alpine:3.24` + Python 3.14 + 上述包（含 onnxruntime / numpy） |
 | `wheelhouse` / `latest` | 上面两者的滚动标签 |
+| `dev` / `dev-wheelhouse` | 上面两者的开发版，跟随 main 分支的最新构建 |
 
-`<ver>` 只在 tag 推送时产出；workflow_dispatch 只更新滚动标签。
+`<ver>` 与 `latest` 只在 tag 推送时产出，latest 始终追最近一次 tag；main 推送与 workflow_dispatch 只推进 dev，不动正式标签与滚动标签。
 
 ## 构建
 
