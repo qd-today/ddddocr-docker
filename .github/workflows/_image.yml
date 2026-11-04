@@ -597,7 +597,9 @@ jobs:
           for plat in $(echo "$PLATFORMS" | tr ',' ' '); do
             arch=$(arch_of "$plat")
             echo "::group::$plat -> $arch"
-            cid=$(docker create --platform "$plat" "$WH_IMAGE" noop)
+            dg=$(python3 .github/workflows/scripts/wheel_digest.py "$WH_IMAGE" "$plat")
+            docker pull -q "${WH_IMAGE%:*}"@$dg >/dev/null
+            cid=$(docker create "${WH_IMAGE%:*}"@$dg noop)
             rm -rf "/tmp/rel/wheels-$arch"
             docker cp "$cid:/wheels" "/tmp/rel/wheels-$arch"
             docker rm -f "$cid" >/dev/null
