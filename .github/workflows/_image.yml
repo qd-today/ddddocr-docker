@@ -575,6 +575,8 @@ jobs:
           VERSION: ${{ inputs.ddddocr_version }}
         run: |
           set -euo pipefail
+          # tag 推送时 workflow_call 的 inputs 可能为空，tag 名本身就是版本号
+          VERSION="${VERSION:-$(basename "${GITHUB_REF}")}"
           arch_of() {
             case "$1" in
               linux/amd64|linux/x86_64) echo x86_64 ;;
