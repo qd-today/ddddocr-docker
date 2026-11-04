@@ -119,11 +119,11 @@ jobs:
       dddocr_ref: ${{ steps.plan.outputs.dddocr_ref }}
       version: ${{ steps.plan.outputs.version }}
     steps:
-      - name: Self-test CI scripts
-        run: python3 .github/workflows/scripts/selftest.py
       - name: Checkout
         uses: actions/checkout@v4
       - name: Check version consistency
+      - name: Self-test CI scripts
+        run: python3 .github/workflows/scripts/selftest.py
         run: |
           # 版本号只有一个源头：Dockerfile 的 ARG 默认值。README 里的是它的副本，
           # 对不上就在这里失败——比等到构建完才发现文档过期早得多。

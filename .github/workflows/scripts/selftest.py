@@ -103,11 +103,36 @@ def test_readme_mentions_dev():
     check("标签章节说明 latest 只由 tag 产出", "tag 推送" in section)
 
 
+
+
+def test_script_jobs_have_checkout():
+    print("跑脚本的 job 要先 checkout:")
+    for wf in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        text = wf.read_text()
+        if "scripts/" not in text:
+            continue
+        blocks = re.split(r"(?m)^  (?=\w)", text)
+        for block in blocks:
+            job = block.split("\n", 1)[0].rstrip(":").strip()
+            if "scripts/" not in block:
+                continue
+            lines = block.split("\n")
+            co = next((k for k, l in enumerate(lines) if "actions/checkout" in l), None)
+            sc = next((k for k, l in enumerate(lines) if "scripts/" in l), None)
+            if co is None:
+                check(f"{wf.name} / {job}: 跑脚本但没有 checkout", False)
+            elif sc is not None and sc < co:
+                check(f"{wf.name} / {job}: 脚本在 checkout 之前执行", False,
+                      "工作目录里还没有仓库文件，脚本会找不到")
+            else:
+                check(f"{wf.name} / {job}: 先 checkout 再跑脚本", True)
+
 def main():
     test_plan_output_keys()
     test_tag_assignment()
     test_cache_bust_wired()
     test_readme_mentions_dev()
+    test_script_jobs_have_checkout()
     print()
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} 项 -> {FAILURES}")
