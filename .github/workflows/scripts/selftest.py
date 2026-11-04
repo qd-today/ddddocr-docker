@@ -127,12 +127,36 @@ def test_script_jobs_have_checkout():
             else:
                 check(f"{wf.name} / {job}: 先 checkout 再跑脚本", True)
 
+
+def test_env_vars_in_scope():
+    print("步骤引用的变量在作用域内:")
+    import yaml
+    text = (ROOT / ".github/workflows/_image.yml").read_text()
+    doc = yaml.safe_load(text)
+    known = set((doc.get("env") or {}).keys())
+    for job in (doc.get("jobs") or {}).values():
+        known |= set((job.get("env") or {}).keys())
+        for st in job.get("steps") or []:
+            known |= set((st.get("env") or {}).keys())
+
+    i = text.find("Publish wheels to GitHub Release")
+    check("Release 步骤存在", i > 0)
+    if i < 0:
+        return
+    block = text[i:i + 3500]
+    # 脚本里自己赋值的变量也算已定义（如 ASSET_PREFIX / WH_SUFFIX）
+    known |= set(re.findall(r"(?m)^\s*(\w+)=", block))
+    used = set(re.findall(r"\$\{(IMAGE|VERSION|VERSION_PREFIX|PLATFORMS|GHCR_IMAGE|PUBLISH|ASSET_PREFIX|WH_IMAGE|WH_SUFFIX)\}", block))
+    for var in sorted(used):
+        check(f"${{{var}}} 有定义", var in known, f"已定义: {sorted(known)}")
+
 def main():
     test_plan_output_keys()
     test_tag_assignment()
     test_cache_bust_wired()
     test_readme_mentions_dev()
     test_script_jobs_have_checkout()
+    test_env_vars_in_scope()
     print()
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} 项 -> {FAILURES}")
