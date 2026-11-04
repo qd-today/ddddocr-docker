@@ -537,16 +537,13 @@ jobs:
             done
           }
 
-          # tag 命名按模式分三种，避免 dispatch 污染版本 tag：
-          #   tag 推送           -> 版本 tag + 滚动 tag（1.6.1/latest、1.6.1-wheelhouse/wheelhouse）
-          #   dispatch 勾了 push -> 只滚滚动 tag（latest/wheelhouse）
-          #   dispatch 未勾 push -> dev（dev/dev-wheelhouse），给测试用，不碰正式 tag
+          # 标签归属与 qd 一致，两族互斥：
+          #   tag 推送              -> 版本 tag + 滚动 tag（1.24.4 / latest、1.24.4-wheelhouse / wheelhouse）
+          #   main 推送 / dispatch    -> 只推进 dev（dev / dev-wheelhouse）
+          # latest 始终追最近一次 tag，所以只有 tag 推送能移动它。
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             RT_TAGS="${VERSION} latest"
             WH_TAGS="${VERSION}-wheelhouse wheelhouse"
-          elif [ "${{ inputs.push }}" = "true" ]; then
-            RT_TAGS="latest"
-            WH_TAGS="wheelhouse"
           else
             RT_TAGS="dev"
             WH_TAGS="dev-wheelhouse"
