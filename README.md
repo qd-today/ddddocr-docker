@@ -1,4 +1,6 @@
 # ddddocr Docker 镜像（Alpine）
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fqd-today%2Fddddocr-docker.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fqd-today%2Fddddocr-docker?ref=badge_shield)
+
 
 ddddocr 运行栈的 musllinux wheel 分发，另附装好的可运行镜像。三个包在本仓库自编或自打包：
 `ddddocr`（纯 python + 模型文件）、`opencv`（最小化）、`Pillow`；onnxruntime 与 numpy 取自
@@ -208,3 +210,7 @@ plan → build-wheel → build → smoke → publish。
   子集构建禁止发布
 
 </details>
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fqd-today%2Fddddocr-docker.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fqd-today%2Fddddocr-docker?ref=badge_large)
