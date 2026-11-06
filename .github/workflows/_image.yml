@@ -238,13 +238,25 @@ jobs:
         # apk 提供的库写成 referenced-dependencies，FOSSA 拿 ref 去自己的知识库查许可证
         # 和漏洞；自编库（opencv/pillow/...）才由我们给许可证。
         # 没有 secret（fork PR）时脚本自行跳过，不会让 CI 变红。
-        # FOSSA_PROJECT 用仓库 locator，与 qd 主项目（git+github.com/qd-today/qd）同一套命名，
-        # 这样 github 扫描与这里的上传落在同一个项目里。
+        # FOSSA_PROJECT 必须是**纯项目名**，不能写成 git+github.com/... 的仓库 locator。
+        # CLI 上传永远把 fetcher 拼成 custom+<orgId>/<名字>；传 git+... 会被拼成
+        # custom+38165/git+github.com/... 这种不存在的项目，直接报 Project not found。
+        # Quick Import（GitHub App）建的 git+github.com/... 项目与 CLI 项目是两套命名空间，
+        # 互不可写，所以这里只能新建一个 custom+ 项目。
+        # 为什么只让一个平台上传、且 revision 不含平台后缀：
+        # FOSSA 的 issue 列表只展示项目**最新 revision** 的集合（projects[].latest 才有值）。
+        # 每个平台各传一个 revision 的话，最后跑完的那个决定你看到哪些 issue，
+        # 其它架构上 ignore 掉的条目会因为 latest 切走而整个消失；而且 ignore 是按 source
+        # locator 粘的，apk+libgcc#...$x86_64 与 $aarch64 是两个不同 source，覆盖不了。
+        # 许可证义务与架构无关（apk 集合相同，只是 locator 的 arch 字段不同），
+        # 所以固定取 linux/amd64 这一个平台，revision 只用 ref 名。
+        # 副作用：只构建不含 amd64 的子集时不会上传——子集构建本来就是验证用，可接受。
+        if: ${{ matrix.platform == 'linux/amd64' }}
         env:
           FOSSA_API_KEY: ${{ secrets.FOSSA_API_KEY }}
           FOSSA_MODE: analyze
-          FOSSA_PROJECT: git+github.com/qd-today/ddddocr-docker
-          FOSSA_REVISION: ${{ github.ref_name }}+${{ matrix.group }}
+          FOSSA_PROJECT: ddddocr-docker
+          FOSSA_REVISION: ${{ github.ref_name }}
         run: sh .github/workflows/scripts/upload-fossa.sh
 
   # 第二段：用第一段的产物组装 wheelhouse 与 runtime，推 digest。

@@ -1,5 +1,5 @@
 # ddddocr Docker 镜像（Alpine）
-[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fqd-today%2Fddddocr-docker.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fqd-today%2Fddddocr-docker?ref=badge_shield)
+[![FOSSA Status](https://app.fossa.com/api/projects/custom%2B38165%2Fddddocr-docker.svg?type=shield)](https://app.fossa.com/projects/custom%2B38165%2Fddddocr-docker?ref=badge_shield)
 
 
 ddddocr 运行栈的 musllinux wheel 分发，另附装好的可运行镜像。三个包在本仓库自编或自打包：
@@ -213,4 +213,4 @@ plan → build-wheel → build → smoke → publish。
 
 
 ## License
-[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fqd-today%2Fddddocr-docker.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fqd-today%2Fddddocr-docker?ref=badge_large)
+[![FOSSA Status](https://app.fossa.com/api/projects/custom%2B38165%2Fddddocr-docker.svg?type=large)](https://app.fossa.com/projects/custom%2B38165%2Fddddocr-docker?ref=badge_large)

@@ -23,7 +23,10 @@
 # 环境变量：
 #   FOSSA_API_KEY   必填；缺省则跳过（fork PR 拿不到 secret，属正常情况）
 #   FOSSA_MODE      analyze（默认）| sbom
-#   FOSSA_PROJECT   项目 locator，CI 传 git+github.com/qd-today/<repo>
+#   FOSSA_PROJECT   **纯项目名**，不要带 git+github.com/ 前缀。CLI 会把它拼成
+#                   custom+<orgId>/<name>；传仓库 locator 会拼出 custom+38165/git+github.com/...
+#                   这种不存在的项目并报 Project not found。
+#                   不设则退回 git remote origin，同样会被拼成 custom+ 下的怪名字，所以 CI 必传。
 #   FOSSA_REVISION  版本前缀，建议 "<tag>+<arch>"；默认 git sha
 #   WHEELHOUSE      wheelhouse 目录，默认 dist/wheels
 #   SBOM_GLOB       sbom 模式的 SBOM 搜索路径，默认 $WHEELHOUSE/sbom/*.cdx.json
