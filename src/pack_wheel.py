@@ -152,6 +152,24 @@ def pack_tree(unroot: Path, dest_dir: Path) -> Path:
     return produced[0]
 
 
+def host_platform() -> str:
+    """打包机的平台标签（``linux_aarch64`` 这种）。
+
+    不能直接用 ``sysconfig.get_platform()``：Dockerfile 里为了跨架构把
+    ``_PYTHON_HOST_PLATFORM`` 设成了 ``$PYTHON_HOST_PLATFORM``，本地不传 build-arg
+    时它就是个**空串**，而 get_platform() 见到这个变量就原样返回 —— wheel 名字会变成
+    ``xxx-cp314-cp314-.whl``，被 ``wheel pack`` 判成 Bad wheel filename 直接失败。
+    这里补一个回退：值本身只是过渡用的，auditwheel 之后会把标签重打成
+    ``musllinux_1_2_<arch>``。
+    """
+    plat = sysconfig.get_platform()
+    if not plat:
+        import platform as _platform
+
+        plat = "linux-" + (_platform.machine() or "unknown")
+    return plat.replace("-", "_").replace(".", "_")
+
+
 def write_dist_info(unroot: Path, name: str, version: str, summary: str, requires: list[str]) -> None:
     # PEP 427：dist-info 目录名里的连字符要转义成下划线（发行名本身保持原样）
     escaped = re.sub(r"[-_.]+", "_", name)
@@ -168,7 +186,7 @@ def write_dist_info(unroot: Path, name: str, version: str, summary: str, require
     (dist_info / "METADATA").write_text("\n".join(meta) + "\n", encoding="utf-8")
 
     major, minor = sys.version_info[:2]
-    plat = sysconfig.get_platform().replace("-", "_").replace(".", "_")
+    plat = host_platform()
     # 这里的 plat 只是「打包机的平台」，auditwheel 之后会改成 musllinux_1_2_<arch>
     (dist_info / "WHEEL").write_text(
         "Wheel-Version: 1.0\n"
@@ -426,12 +444,40 @@ def verify_index(root: Path) -> None:
     print(f"索引校验通过: {len(pages)} 个项目页，链接与 sha256 全部对得上")
 
 
+def run_compliance(out_dir: Path, deny: list[str], allow_unknown: bool = False) -> None:
+    """收尾的合规层：deny 断言 + NOTICE / SOURCE-OFFER / SBOM / 许可证全文。
+
+    本仓库另有一处打包期断言（``assert_no_imagequant``）只管 Pillow；这里补上对
+    **所有** wheel 的通用拦截——将来改构建参数把 FFmpeg / Qt 带进来时能被这里挡住。
+    """
+    import compliance
+
+    compliance.run(out_dir, deny=deny or None, allow_unknown=allow_unknown)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--opencv", metavar="PREFIX", help="cmake 的安装前缀，产出 opencv wheel")
     ap.add_argument("--repair", metavar="WHEEL", help="pip 打出来的 wheel，auditwheel 修复后落盘")
     ap.add_argument("--ddddocr", metavar="SRC", help="ddddocr 源码目录，产出纯 python wheel")
     ap.add_argument("--emit-index", action="store_true", help="为 --out-dir 里已有的 wheel 生成 simple/")
+    ap.add_argument(
+        "--compliance",
+        action="store_true",
+        help="配合 --emit-index：做 deny 断言并生成 NOTICE / SOURCE-OFFER / SBOM / 许可证全文",
+    )
+    ap.add_argument(
+        "--deny-lib",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="禁止随包分发的库（可重复）；默认用 compliance.DEFAULT_DENY",
+    )
+    ap.add_argument(
+        "--allow-unknown",
+        action="store_true",
+        help="允许许可证无法识别的随包库（默认拦下，合规门禁里 unknown 等于未评估）",
+    )
     ap.add_argument("--out-dir", required=True, help="wheel 输出目录（--emit-index 时为索引所在目录）")
     ap.add_argument("--version", default="", help="--opencv 的版本号（写进 wheel 元数据）")
     ap.add_argument(
@@ -447,6 +493,8 @@ def main() -> int:
 
     out_dir = Path(args.out_dir).resolve()
     if args.emit_index:
+        if args.compliance:
+            run_compliance(out_dir, args.deny_lib, args.allow_unknown)
         return emit_index(out_dir)
     if args.opencv:
         if not args.version:

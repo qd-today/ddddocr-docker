@@ -231,6 +231,18 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      - name: Upload SBOM to FOSSA
+        # 用构建时实测的 SBOM 覆盖 FOSSA 的 lockfile 分析：自编 wheel 的实际依赖
+        # （auditwheel 收进 <dist>.libs/ 的那些）在 lockfile 里根本不可见。
+        # 没有 secret（fork PR）时脚本自行跳过，不会让 CI 变红。
+        # FOSSA_PROJECT 用仓库 locator，与 qd 主项目（git+github.com/qd-today/qd）同一套命名，
+        # 这样 github 扫描与 SBOM 上传落在同一个项目里；每个 wheel 会另起一条 revision。
+        env:
+          FOSSA_API_KEY: ${{ secrets.FOSSA_API_KEY }}
+          FOSSA_PROJECT: git+github.com/qd-today/ddddocr-docker
+          FOSSA_REVISION: ${{ github.ref_name }}+${{ matrix.group }}
+        run: sh .github/workflows/scripts/upload-sbom.sh
+
   # 第二段：用第一段的产物组装 wheelhouse 与 runtime，推 digest。
   #
   # 统一跑 x86_64。arm64 runner 走内核 compat 模式时 Python 自报 linux-aarch64，

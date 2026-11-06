@@ -4,5 +4,7 @@
 venv
 .lh
 .DS_Store
+# 本地 --target wheel / artifacts 的导出目录
+dist/
 __pycache__/
 *.pyc

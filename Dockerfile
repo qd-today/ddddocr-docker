@@ -44,12 +44,16 @@ FROM ${ONNX_WHEELHOUSE} AS onnx-wheelhouse
 FROM ${BASE_IMAGE} AS build
 
 # platform tag 由 CI 按目标平台算好传进来（plan.py 的 python_host_platform）。
-# 为什么必须在 ENV 而不是某条 RUN 里 export：arm 容器在原生 arm64 runner 上走内核
-# compat 模式时 uname 报 aarch64，Python 的 sysconfig.get_platform() 与 EXT_SUFFIX
-# 都会跟着错——cmake 生成的扩展模块名错、打包时按正确 tag 去找就找不到 .so，
-# auditwheel 报 'no ELF executable or shared library file'。改在 ENV 才覆盖全流程。
+# 为什么需要它：arm 容器在原生 arm64 runner 上走内核 compat 模式时 uname 报 aarch64，
+# Python 的 sysconfig.get_platform() 与 EXT_SUFFIX 都会跟着错——cmake 生成的扩展模块名错、
+# 打包时按正确 tag 去找就找不到 .so，auditwheel 报 'no ELF executable or shared library file'。
+#
+# 但不能用 ENV 无条件设 _PYTHON_HOST_PLATFORM：没传 build-arg 时它是空串，而
+# sysconfig.get_platform() 只要看到这个变量存在就原样返回 —— 空串会让 pip 的平台标签
+# 全错（--find-links 里的 musllinux 轮子都匹配不上），wheel 名字也会变成
+# xxx-cp314-cp314-.whl 被 wheel pack 拒掉。所以只在真给了值时才 export，
+# 见下面每个跑 python / cmake 的 RUN 的第二行。
 ARG PYTHON_HOST_PLATFORM=""
-ENV _PYTHON_HOST_PLATFORM=${PYTHON_HOST_PLATFORM}
 
 
 ARG APK_MIRROR=""
@@ -103,6 +107,7 @@ RUN apk add --no-cache \
         zlib-dev
 
 RUN set -eux; \
+    if [ -n "${PYTHON_HOST_PLATFORM}" ]; then export _PYTHON_HOST_PLATFORM="${PYTHON_HOST_PLATFORM}"; fi; \
     if [ -n "${PIP_MIRROR}" ]; then pip_args="-i ${PIP_MIRROR}"; else pip_args=""; fi; \
     python3 -m pip install --no-cache-dir --break-system-packages \
         ${pip_args} "auditwheel==${AUDITWHEEL_VERSION}"; \
@@ -111,6 +116,8 @@ RUN set -eux; \
 # OpenCV 的 cmake 要用 numpy 的头文件，所以构建期也得有 numpy。它和运行期同源：
 # 从 onnxruntime 的 wheelhouse 取（六个架构都有 musllinux 轮子，PyPI 没有）。
 RUN --mount=type=bind,from=onnx-wheelhouse,source=/wheels,target=/onnx-wheels \
+    set -eu; \
+    if [ -n "${PYTHON_HOST_PLATFORM}" ]; then export _PYTHON_HOST_PLATFORM="${PYTHON_HOST_PLATFORM}"; fi; \
     python3 -m pip install --no-cache-dir --break-system-packages \
         --no-index --find-links /onnx-wheels "numpy==${NUMPY_VERSION}" \
  && python3 -c "import numpy; print('numpy', numpy.__version__, numpy.get_include())"
@@ -137,6 +144,7 @@ RUN set -eux; \
 #   2) 走对 ARM32 分支后，不应再出现 AArch64 专属的 dispatch 探测（NEON_DOTPROD /
 #      NEON_BF16 只在 AARCH64 分支里定义）
 RUN set -eux; \
+    if [ -n "${PYTHON_HOST_PLATFORM}" ]; then export _PYTHON_HOST_PLATFORM="${PYTHON_HOST_PLATFORM}"; fi; \
     cmake_baseline=""; \
     if [ -n "${OPENCV_CPU_BASELINE}" ]; then \
         cmake_baseline="-DCPU_BASELINE=${OPENCV_CPU_BASELINE}"; \
@@ -190,13 +198,18 @@ RUN set -eux; \
 
 
 # ---- Pillow ----------------------------------------------------------------
-# --no-binary 强制从源码构建：build_deps 里没有 libimagequant-dev，就不会像 Alpine 的
-# py3-pillow 那样链上 GPL-3.0 的 libimagequant。只开验证码用得到的格式（jpeg/png/webp），
-# 不装 tiff/freetype/lcms2。
+# --no-binary 强制从源码构建。只开验证码用得到的格式（jpeg/png/webp）。
+#
+# imagequant 必须显式关：以前是靠「build_deps 里没装 libimagequant-dev，检测不到就不会
+# 编进去」这条**环境假设**保证的，换基础镜像、Pillow 改构建逻辑、或基础镜像里恰好带了
+# 这个 dev 包，都会静默链上 GPL-3.0。13.0.0 的官方 wheel 就已经带了（它自己的 SBOM 里
+# 写着 libimagequant 4.4.1 -> GPL-3.0-or-later），所以不能指望上游默认值。
+# `-C imagequant=disable` 是 Pillow setup.py 的官方开关（features 列表里的一项）。
 #
 # 用默认的 build isolation：Pillow 13 的构建后端依赖 pybind11，装在隔离环境里比往镜像
 # 里塞一份编译期依赖干净（镜像里那套是给 auditwheel 用的，与 Pillow 无关）。
 RUN set -eux; \
+    if [ -n "${PYTHON_HOST_PLATFORM}" ]; then export _PYTHON_HOST_PLATFORM="${PYTHON_HOST_PLATFORM}"; fi; \
     case "${TARGETARCH}" in \
         amd64|arm64|arm|ppc64le|riscv64|loong64) : ;; \
         *) echo "错误: 未知 TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
@@ -204,6 +217,7 @@ RUN set -eux; \
     if [ -n "${PIP_MIRROR}" ]; then pip_args="--index-url ${PIP_MIRROR}"; else pip_args=""; fi; \
     python3 -m pip wheel ${pip_args} --no-cache-dir \
         --no-binary :all: --no-deps \
+        --config-settings=imagequant=disable \
         --wheel-dir /tmp/pillow-wheel "pillow==${PILLOW_VERSION}"; \
     ls -l /tmp/pillow-wheel
 
@@ -219,18 +233,22 @@ RUN set -eux; \
     git checkout -q FETCH_HEAD; \
     git rev-parse HEAD
 
-COPY src/pack_wheel.py /usr/local/bin/pack_wheel.py
+# 合规模块与许可证全文：pack_wheel.py 在收尾（--compliance）时按同目录 import。
+# 只进构建阶段，运行镜像里没有这些文件。
+COPY src/pack_wheel.py src/compliance.py /usr/local/bin/
+COPY src/licenses /usr/local/share/qdpack/licenses
 # 系统包清单随 wheelhouse 一起发布：上层照单 apk add 即可，不必各自维护
 COPY system-packages.txt /wheels/system-packages.txt
 
 RUN set -eux; \
+    if [ -n "${PYTHON_HOST_PLATFORM}" ]; then export _PYTHON_HOST_PLATFORM="${PYTHON_HOST_PLATFORM}"; fi; \
     python3 /usr/local/bin/pack_wheel.py --opencv /opt/opencv \
         --version "${OPENCV_WHEEL_VERSION}" --out-dir /wheels; \
     python3 /usr/local/bin/pack_wheel.py \
         --repair "$(ls /tmp/pillow-wheel/pillow-*.whl)" --out-dir /wheels; \
     python3 /usr/local/bin/pack_wheel.py --ddddocr /src/ddddocr \
         --expect-version "${DDDDOCR_VERSION}" --out-dir /wheels; \
-    python3 /usr/local/bin/pack_wheel.py --emit-index --out-dir /wheels; \
+    python3 /usr/local/bin/pack_wheel.py --emit-index --compliance --out-dir /wheels; \
     cd /wheels; \
     ls -l; \
     sha256sum ./*.whl > SHA256SUMS; \
