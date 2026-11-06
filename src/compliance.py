@@ -11,6 +11,7 @@
     /wheels/licenses/LGPL-2.1.txt
     /wheels/sbom/<wheel>.cdx.json      每个 wheel 一份 CycloneDX 1.5
     /wheels/sbom/wheelhouse.cdx.json   汇总
+    /wheels/fossa-deps.yml             FOSSA 自行解析的依赖声明（非 Enterprise 路径，见下）
 
 为什么不是「往 wheel 里塞」而是「放 wheelhouse 根目录」：改 wheel 要重算 RECORD 并让
 上游算好的 SHA256SUMS 失效；而 wheelhouse 镜像本身也是对外发布的产物，把文书放在这一层
@@ -20,11 +21,17 @@
 ``libfoo-<hash>.so.N``，去掉 hash 后按 apk 的文件清单匹配）。这一点很关键：需要精确版本
 的恰好都是 apk 提供的 copyleft 组件；自编的 curl / ngtcp2 / nghttp3 是宽松许可，版本精度
 不影响义务履行。
+
+``fossa-deps.yml`` 是给 FOSSA 的入口，不是给人看的清单：``fossa sbom analyze``（直传
+CycloneDX）是 Enterprise 订阅独占，普通订阅只能靠 ``fossa analyze`` 读这份文件。所以 apk
+提供的库写成 ``referenced-dependencies``——FOSSA 拿 ref 去自己的知识库查许可证和漏洞，
+结论由它得出；没有 apk 出处的自编库才写成 ``custom-dependencies``（只给许可证，无漏洞数据）。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -34,6 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 APK_DB = Path("/lib/apk/db/installed")
+OS_RELEASE = Path("/etc/os-release")
 
 # --------------------------------------------------------------------------- #
 # 硬禁止清单：命中的库一律让构建失败
@@ -200,6 +208,7 @@ class Component:
     origin: str          # apk 包名，或 "self-built"
     files: list[str] = field(default_factory=list)
     note: str = ""       # 许可证判定留痕（apk 声明的原始表达式）
+    arch: str = ""       # apk 的 A: 字段，写 fossa-deps.yml 的 apk 引用时要用
 
     @property
     def is_copyleft(self) -> bool:
@@ -209,13 +218,13 @@ class Component:
 # --------------------------------------------------------------------------- #
 # apk 数据库
 # --------------------------------------------------------------------------- #
-def load_apk_index() -> dict[str, tuple[str, str, str]]:
-    """返回 basename -> (包名, 版本, 许可证)。没有 apk db（非 Alpine 构建机）时返回空表。"""
-    index: dict[str, tuple[str, str, str]] = {}
+def load_apk_index() -> dict[str, tuple[str, str, str, str]]:
+    """返回 basename -> (包名, 版本, 许可证, 架构)。没有 apk db（非 Alpine 构建机）时返回空表。"""
+    index: dict[str, tuple[str, str, str, str]] = {}
     if not APK_DB.is_file():
         return index
     for block in APK_DB.read_text(encoding="utf-8", errors="ignore").split("\n\n"):
-        pkg = version = lic = None
+        pkg = version = lic = arch = None
         entries: list[str] = []
         directory = ""
         for line in block.splitlines():
@@ -225,6 +234,8 @@ def load_apk_index() -> dict[str, tuple[str, str, str]]:
                 version = line[2:]
             elif line.startswith("L:"):
                 lic = line[2:]
+            elif line.startswith("A:"):
+                arch = line[2:]
             elif line.startswith("F:"):
                 directory = line[2:]
             elif line.startswith("R:"):
@@ -233,10 +244,10 @@ def load_apk_index() -> dict[str, tuple[str, str, str]]:
             continue
         for path in entries:
             key = path.rsplit("/", 1)[-1]
-            index.setdefault(key, (pkg, version, lic or "unknown"))
+            index.setdefault(key, (pkg, version, lic or "unknown", arch or ""))
             flat = SO_VERSION.sub(".so", key)
             if flat != key:
-                index.setdefault(flat, (pkg, version, lic or "unknown"))
+                index.setdefault(flat, (pkg, version, lic or "unknown", arch or ""))
     return index
 
 
@@ -245,12 +256,12 @@ def clean_lib(basename: str) -> str:
     return HASH_SUFFIX.sub("", basename)
 
 
-def classify(lib: str, apk: dict[str, tuple[str, str, str]]) -> Component:
+def classify(lib: str, apk: dict[str, tuple[str, str, str, str]]) -> Component:
     cleaned = clean_lib(lib)
-    origin, version, apk_lic = "self-built", "", ""
+    origin, version, apk_lic, arch = "self-built", "", "", ""
     hit = apk.get(cleaned) or apk.get(SO_VERSION.sub(".so", cleaned))
     if hit:
-        origin, version, apk_lic = hit
+        origin, version, apk_lic, arch = hit
 
     for pattern, name, lic, url in KNOWN:
         if re.search(pattern, cleaned):
@@ -258,11 +269,12 @@ def classify(lib: str, apk: dict[str, tuple[str, str, str]]) -> Component:
             return Component(
                 lib=lib, name=name, version=version,
                 license=resolved, url=url, origin=origin, files=[lib], note=note,
+                arch=arch,
             )
     resolved, note = pick_license(apk_lic, "unknown")
     return Component(
         lib=lib, name=cleaned, version=version,
-        license=resolved, url="", origin=origin, files=[lib], note=note,
+        license=resolved, url="", origin=origin, files=[lib], note=note, arch=arch,
     )
 
 
@@ -511,6 +523,130 @@ def write_sbom(root: Path, per_wheel: dict[str, list[Component]]) -> None:
     )
 
 
+FOSSA_DEPS = "fossa-deps.yml"
+
+
+def load_os_release() -> tuple[str, str]:
+    """返回 (ID, VERSION_ID)，例如 ("alpine", "3.24.3")。"""
+    if not OS_RELEASE.is_file():
+        return "", ""
+    values: dict[str, str] = {}
+    for line in OS_RELEASE.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values.get("ID", ""), values.get("VERSION_ID", "")
+
+
+def load_version_hints(env: dict[str, str] | None = None) -> dict[str, str]:
+    """``QD_LIB_VERSIONS="curl=8.23.0,OpenBLAS=0.3.30"`` -> {"curl": "8.23.0", ...}。
+
+    自编的库在 apk 数据库里查不到版本，只能由构建方告知。不填就写 "unknown"，
+    不影响许可证结论，只影响 FOSSA 页面上的版本显示。
+    """
+    raw = (env or os.environ).get("QD_LIB_VERSIONS", "")
+    hints: dict[str, str] = {}
+    for item in raw.replace(";", ",").split(","):
+        name, sep, version = item.partition("=")
+        if sep and name.strip() and version.strip():
+            hints[name.strip().lower()] = version.strip()
+    return hints
+
+
+def apk_refs_of(comp: Component, apk: dict[str, tuple[str, str, str, str]]) -> list[tuple[str, str, str]]:
+    """返回这个组件里各库文件所属的 apk 包 [(包名, 版本, 架构), ...]。
+
+    为什么要按文件拆而不是直接用 ``Component.origin``：一个 Component 是「同一 upstream
+    多个库」合并出来的（libwebp / libwebpdemux / libwebpmux / libsharpyuv 在 NOTICE 里
+    只占 libwebp 一行），origin 只剩第一个命中的包。而 FOSSA 的 apk 引用必须精确到包，
+    所以按合并前记录的每个文件名逐个反查。
+    """
+    found: set[tuple[str, str, str]] = set()
+    for f in comp.files or [comp.lib]:
+        cleaned = clean_lib(f)
+        hit = apk.get(cleaned) or apk.get(SO_VERSION.sub(".so", cleaned))
+        if hit:
+            found.add((hit[0], hit[1], hit[3]))
+    return sorted(found)
+
+
+def write_fossa_deps(root: Path, per_wheel: dict[str, list[Component]]) -> tuple[int, int]:
+    """生成 ``fossa-deps.yml``，让 ``fossa analyze`` 在非 Enterprise 订阅下也能识别这些库。
+
+    两条路径分工：
+
+    * 有 apk 出处的库 -> ``referenced-dependencies``（``type: apk``）。FOSSA 后端拿这个
+      ref 去**它自己的知识库**查许可证**和漏洞**——referenced 是唯一支持漏洞的类型，
+      也就是说「这是什么许可证」这个结论由 FOSSA 自己得出，不是我们喂给它的。
+    * 自编的库（curl / ngtcp2 / nghttp3 / OpenBLAS 这类没有 apk 包的）->
+      ``custom-dependencies``，license 必填，用 KNOWN 表里核过的值。
+
+    ``fossa sbom analyze`` 是 Enterprise 独占，非企业版只能靠 ``fossa analyze`` 读
+    fossa-deps 文件。该文件要求至少有一条有效依赖，全空时不生成（免得 FOSSA 报错）。
+
+    返回 (apk 引用数, 自编依赖数)。
+    """
+    os_id, os_version = load_os_release()
+    can_ref = bool(os_id and os_version)
+    hints = load_version_hints()
+    apk = load_apk_index() if can_ref else {}
+
+    refs: set[tuple[str, str, str]] = set()
+    customs: dict[tuple[str, str], Component] = {}
+    for comps in per_wheel.values():
+        for c in comps:
+            hits = apk_refs_of(c, apk) if apk else []
+            if hits:
+                refs.update(hits)
+            else:
+                customs.setdefault((c.name, c.version or hints.get(c.name.lower(), "unknown")), c)
+
+    if not refs and not customs:
+        return 0, 0
+
+    lines = [
+        "# 由 pack_wheel.py --compliance 从 wheel 的 .libs/ 实测生成，不要手改。",
+        "#",
+        "# 用途: 非 Enterprise 订阅下，`fossa analyze` 只能读这份文件才能看到随包的原生库：",
+        "#   referenced-dependencies (type: apk) —— FOSSA 自己去查 Alpine 包的许可证与漏洞",
+        "#   custom-dependencies —— 自编库，没有 apk 出处，许可证据 compliance.py 的 KNOWN 表",
+        f"# 基础镜像: {os_id or '未知'} {os_version or ''}".rstrip(),
+        "# apk 归属按 /lib/apk/db/installed 的文件清单判定；同路径被我们自己的构建覆盖时"
+        "（如 curl）仍记在该 apk 包名下。",
+    ]
+    if not can_ref:
+        lines.append("# 未读到 /etc/os-release，全部按自编库处理（apk 引用必须有 os 与 osVersion）")
+    unknown_versions = sorted({n for (n, v) in customs if v == "unknown"})
+    if unknown_versions:
+        lines.append("# 版本未知（自编库，apk 库里没有）: " + "、".join(unknown_versions))
+        lines.append('# 补版本: 设 QD_LIB_VERSIONS="名字=版本,名字=版本" 后重新生成')
+    lines.append("")
+    if refs:
+        lines.append("referenced-dependencies:")
+        for pkg, version, arch in sorted(refs):
+            lines += [
+                f'  - name: "{pkg}"',
+                f'    version: "{version}"',
+                '    type: "apk"',
+                f'    arch: "{arch}"',
+                f'    os: "{os_id}"',
+                f'    osVersion: "{os_version}"',
+            ]
+    if customs:
+        lines.append("custom-dependencies:")
+        for (name, version), c in sorted(customs.items()):
+            lines += [
+                f'  - name: "{name}"',
+                f'    version: "{version}"',
+                f'    license: "{c.license}"',
+            ]
+            if c.url:
+                lines += ["    metadata:", f'      homepage: "{c.url}"']
+    (root / FOSSA_DEPS).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(refs), len(customs)
+
+
 def needed_texts(per_wheel: dict[str, list[Component]]) -> list[str]:
     """按实际出现的 copyleft 决定要随附哪些许可证全文。
 
@@ -605,6 +741,7 @@ def run(root: Path, deny: list[str] | None = None, license_dir: Path | None = No
     write_notice(root, per_wheel)
     write_source_offer(root, per_wheel)
     write_sbom(root, per_wheel)
+    n_ref, n_custom = write_fossa_deps(root, per_wheel)
     lic_dir = license_dir or license_dir_default()
     need = needed_texts(per_wheel)
     copied = copy_licenses(root, lic_dir, need)
@@ -621,5 +758,9 @@ def run(root: Path, deny: list[str] | None = None, license_dir: Path | None = No
     else:
         parts.append("licenses/（无 copyleft 组件，未随附全文）")
     parts.append("sbom/*.cdx.json")
+    if n_ref or n_custom:
+        parts.append(f"{FOSSA_DEPS}（apk 引用 {n_ref} / 自编 {n_custom}）")
+    else:
+        parts.append(f"{FOSSA_DEPS}（未生成，无可用条目）")
     print("合规产物: " + " / ".join(parts))
     print(f"deny 断言通过（{len(deny)} 条模式），无未识别许可证")
