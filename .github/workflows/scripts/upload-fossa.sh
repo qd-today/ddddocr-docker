@@ -61,7 +61,9 @@ if [ "$mode" != "sbom" ]; then
         exit 0
     fi
     echo "→ fossa analyze ${wheelhouse}（依赖文件 ${deps}）"
-    set -- analyze "$wheelhouse" --fossa-deps-file "$deps" --revision "$revision"
+    # --json：成功后打印 project id / revision / url。push-only token 读不到项目内容，
+    # 这行 JSON 是唯一能直接点到那次 revision 的入口，CI 日志里留着很有用。
+    set -- analyze "$wheelhouse" --fossa-deps-file "$deps" --revision "$revision" --json
     if [ -n "$project" ]; then
         set -- "$@" --project "$project"
     fi
