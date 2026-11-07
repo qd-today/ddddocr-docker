@@ -705,6 +705,7 @@ def write_fossa_deps(root: Path, per_wheel: dict[str, list[Component]]) -> tuple
         "# 用途: 非 Enterprise 订阅下，`fossa analyze` 只能读这份文件才能看到随包的原生库：",
         "#   referenced-dependencies (type: apk) —— FOSSA 自己去查 Alpine 包的许可证与漏洞",
         "#   custom-dependencies —— 自编库，没有 apk 出处，许可证据 compliance.py 的 KNOWN 表",
+        "# 自编库的版本来自同目录的 component-versions（构建期由 Dockerfile 写入）。",
         f"# 基础镜像: {os_id or '未知'} {os_version or ''}".rstrip(),
         "# apk 归属按 /lib/apk/db/installed 的文件清单判定；同路径被我们自己的构建覆盖时"
         "（如 curl）仍记在该 apk 包名下。",
@@ -714,7 +715,7 @@ def write_fossa_deps(root: Path, per_wheel: dict[str, list[Component]]) -> tuple
     unknown_versions = sorted({n for (n, v) in customs if v == "unknown"})
     if unknown_versions:
         lines.append("# 版本未知（自编库，apk 库里没有）: " + "、".join(unknown_versions))
-        lines.append('# 补版本: 设 QD_LIB_VERSIONS="名字=版本,名字=版本" 后重新生成')
+        lines.append("# 补版本: 在 component-versions 里加「名字=版本」（或临时设 QD_LIB_VERSIONS）后重新生成")
     lines.append("")
     if refs:
         lines.append("referenced-dependencies:")
