@@ -842,6 +842,9 @@ def run(root: Path, deny: list[str] | None = None, license_dir: Path | None = No
     lic_dir = license_dir or license_dir_default()
     need = needed_texts(per_wheel)
     copied = copy_licenses(root, lic_dir, need)
+    # 没有 copyleft 组件时也留一个空的 licenses/：让产物结构在主线与 ja3 线之间一致，
+    # 下游（qd 的 COPY --from）不用为「这个仓这次有没有 copyleft」写分支。
+    (root / "licenses").mkdir(exist_ok=True)
     missing = [n for n in need if n not in copied]
     if missing:
         raise SystemExit(
@@ -853,7 +856,7 @@ def run(root: Path, deny: list[str] | None = None, license_dir: Path | None = No
     if copied:
         parts.append(f"licenses/{', '.join(copied)}")
     else:
-        parts.append("licenses/（无 copyleft 组件，未随附全文）")
+        parts.append("licenses/（空：本仓无 copyleft 组件）")
     parts.append("sbom/*.cdx.json")
     if n_ref or n_custom:
         parts.append(f"{FOSSA_DEPS}（apk 引用 {n_ref} / 自编 {n_custom}）")
