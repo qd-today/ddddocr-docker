@@ -240,6 +240,9 @@ COPY src/licenses /usr/local/share/qdpack/licenses
 # 系统包清单随 wheelhouse 一起发布：上层照单 apk add 即可，不必各自维护
 COPY system-packages.txt /wheels/system-packages.txt
 
+# 末尾的 component-versions 是自编库版本的落盘，compliance.py 从那里读（键名是 KNOWN
+# 表里的组件名，不是 ARG 名）。写进这个文件的名字同时标记「这是我们自己编的」——
+# OpenCV 5.0.0 与 apk 的 opencv 4.x 不是同一份构建，所以它在 FOSSA 上只能是 custom。
 RUN set -eux; \
     if [ -n "${PYTHON_HOST_PLATFORM}" ]; then export _PYTHON_HOST_PLATFORM="${PYTHON_HOST_PLATFORM}"; fi; \
     python3 /usr/local/bin/pack_wheel.py --opencv /opt/opencv \
@@ -248,10 +251,6 @@ RUN set -eux; \
         --repair "$(ls /tmp/pillow-wheel/pillow-*.whl)" --out-dir /wheels; \
     python3 /usr/local/bin/pack_wheel.py --ddddocr /src/ddddocr \
         --expect-version "${DDDDOCR_VERSION}" --out-dir /wheels; \
-# 自编库的版本落盘给 compliance.py 读（键名是 KNOWN 表里的组件名，不是 ARG 名）。
-# 写进这个文件的名字同时标记了「这是我们自己编的」——OpenCV 5.0.0 是与 apk 的
-# opencv 4.x 不同的构建，所以它在 FOSSA 上只能是 custom-dependency。
-RUN set -eux; \
     mkdir -p /wheels; \
     printf '%s\n' "OpenCV=${OPENCV_VERSION}" > /wheels/component-versions; \
     python3 /usr/local/bin/pack_wheel.py --emit-index --compliance --out-dir /wheels; \
