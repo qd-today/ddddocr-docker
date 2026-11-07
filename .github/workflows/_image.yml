@@ -152,6 +152,12 @@ jobs:
           echo "--- 其余 ---"
           grep -Ev '^(matrix|smoke_matrix)=' /tmp/plan.out
           cat /tmp/plan.out >> "$GITHUB_OUTPUT"
+      - name: Note - subset build skips publish
+        # run 绿只代表「构建 + 冒烟通过」，不代表发布。子集构建最容易在这里被误读，
+        # 所以给一条 warning 注解：页面顶部能看到，但不会把 run 判成失败。
+        if: ${{ steps.plan.outputs.full != 'true' }}
+        run: |
+          echo "::warning::本次为平台子集构建（${{ steps.plan.outputs.expected }}），publish 已跳过，不会发布任何镜像。"
 
   # 第一段：编 wheel，产物导出成 artifact。与 pycurl-docker 的 _image.yml 同构。
   #
