@@ -11,6 +11,8 @@
     /wheels/licenses/LGPL-2.1.txt
     /wheels/sbom/<wheel>.cdx.json      每个 wheel 一份 CycloneDX 1.5
     /wheels/sbom/wheelhouse.cdx.json   汇总
+    /wheels/components.json            所有随包组件的机器可读记录（下列文书的公共来源）
+    /wheels/component-versions         构建期由 Dockerfile 写入的自编库版本（输入，非产物）
     /wheels/fossa-deps.yml             FOSSA 自行解析的依赖声明（非 Enterprise 路径，见下）
 
 为什么不是「往 wheel 里塞」而是「放 wheelhouse 根目录」：改 wheel 要重算 RECORD 并让
@@ -333,7 +335,8 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def write_notice(root: Path, per_wheel: dict[str, list[Component]]) -> None:
+def write_notice(root: Path, per_wheel: dict[str, list[Component]],
+                 hints: dict[str, str] | None = None) -> None:
     lines = [
         "# NOTICE",
         "",
@@ -385,6 +388,29 @@ def write_notice(root: Path, per_wheel: dict[str, list[Component]]) -> None:
             "　" + "、".join(gcc_libs),
             "",
         ]
+    built = sorted(
+        {(c.name, c.version or (hints or {}).get(c.name.lower(), ""), c.origin)
+         for cs in per_wheel.values() for c in cs
+         if hints and c.name.lower() in hints}
+    )
+    if built:
+        lines += [
+            "## 本项目自编的组件",
+            "",
+            "下列二进制由本项目在构建时自行编译，不是从 apk 安装的。它们的许可证结论按",
+            "源码本体判定，在 FOSSA 上的声明方式取决于能否借用 apk 出处：",
+            "",
+            "| 组件 | 版本 | FOSSA 上的声明方式 |",
+            "| --- | --- | --- |",
+        ]
+        for name, ver, origin in built:
+            if origin and origin != "self-built":
+                how = (f"referenced——借用 apk 包 `{origin}` 的同名文件出处，"
+                       "版本与 apk 包同线，因此带漏洞数据")
+            else:
+                how = "custom——apk 里没有对应包，许可证由本项目担保（无漏洞数据）"
+            lines.append(f"| {name} | {ver or '未标注'} | {how} |")
+        lines.append("")
     notes = sorted(
         {(c.name, c.version, c.license, c.note) for cs in per_wheel.values() for c in cs if c.note}
     )
@@ -524,6 +550,11 @@ def write_sbom(root: Path, per_wheel: dict[str, list[Component]]) -> None:
 
 
 FOSSA_DEPS = "fossa-deps.yml"
+# 构建期由 Dockerfile 从 ARG 写入的自编库版本，一行一个：``curl=8.23.0``。
+# 版本在构建时就知道，不该靠人往 CI 里塞环境变量（QD_LIB_VERSIONS 只留作临时覆盖）。
+COMPONENT_VERSIONS = "component-versions"
+# 所有随包组件的机器可读记录：NOTICE / SBOM / fossa-deps 三者的公共来源。
+COMPONENTS_JSON = "components.json"
 
 
 def load_os_release() -> tuple[str, str]:
@@ -539,18 +570,35 @@ def load_os_release() -> tuple[str, str]:
     return values.get("ID", ""), values.get("VERSION_ID", "")
 
 
-def load_version_hints(env: dict[str, str] | None = None) -> dict[str, str]:
-    """``QD_LIB_VERSIONS="curl=8.23.0,OpenBLAS=0.3.30"`` -> {"curl": "8.23.0", ...}。
+def load_version_hints(root: Path | None = None,
+                       env: dict[str, str] | None = None) -> dict[str, str]:
+    """自编库的版本，两个入口，环境变量优先。
 
-    自编的库在 apk 数据库里查不到版本，只能由构建方告知。不填就写 "unknown"，
+    1. ``<wheelhouse>/component-versions``（主路径）：构建期由 Dockerfile 从 ARG 写入，
+       一行一个 ``curl=8.23.0``，``#`` 起注释。键名必须用 **KNOWN 表里的组件名**
+       （如 ``OpenBLAS``、``curl``），不是 Dockerfile 的 ARG 名，也不是 wheel 名。
+    2. ``QD_LIB_VERSIONS="curl=8.23.0,OpenBLAS=0.3.30"``：临时覆盖。
+
+    自编的库在 apk 数据库里查不到版本，只能由构建方告知。查不到又没填就写 "unknown"，
     不影响许可证结论，只影响 FOSSA 页面上的版本显示。
+
+    这个名字集合还有第二个用途：出现在这里的组件就是「我们自己编的」。
+    借用了 apk 出处的自编库（如 curl 覆写 apk libcurl）靠这一条才能和「apk 原装库」区分开。
     """
-    raw = (env or os.environ).get("QD_LIB_VERSIONS", "")
     hints: dict[str, str] = {}
-    for item in raw.replace(";", ",").split(","):
-        name, sep, version = item.partition("=")
-        if sep and name.strip() and version.strip():
-            hints[name.strip().lower()] = version.strip()
+
+    def _feed(raw: str) -> None:
+        for item in raw.replace(";", ",").split(","):
+            name, sep, version = item.partition("=")
+            if sep and name.strip() and version.strip():
+                hints[name.strip().lower()] = version.strip()
+
+    if root is not None:
+        f = Path(root) / COMPONENT_VERSIONS
+        if f.is_file():
+            for line in f.read_text(encoding="utf-8", errors="ignore").splitlines():
+                _feed(line.split("#", 1)[0])
+    _feed((env or os.environ).get("QD_LIB_VERSIONS", ""))
     return hints
 
 
@@ -571,6 +619,52 @@ def apk_refs_of(comp: Component, apk: dict[str, tuple[str, str, str, str]]) -> l
     return sorted(found)
 
 
+def write_components_manifest(root: Path, per_wheel: dict[str, list[Component]],
+                              hints: dict[str, str]) -> None:
+    """生成 ``components.json``：每条随包组件的机器可读记录。
+
+    为什么单独出一份：NOTICE 给人看、SBOM 给工具吃、fossa-deps 给 FOSSA 读，
+    三者字段口径不同，容易各写各的、互相漂移。这份 json 是它们的公共来源，
+    审计时也只需要核对这一处。
+
+    ``selfBuilt`` 的判据是「名字出现在 component-versions 里」——apk 原装库的版本来自
+    apk 数据库，不会出现在那份文件里，所以这个标志能准确区分「我们编的」和「apk 装的」。
+    """
+    os_id, os_version = load_os_release()
+    wheels: dict[str, list[str]] = {}
+    merged: dict[str, dict] = {}
+    for wheel_name, comps in sorted(per_wheel.items()):
+        wheels[wheel_name] = [c.name for c in comps]
+        for c in comps:
+            key = c.name.lower()
+            entry = merged.get(key)
+            if entry is None:
+                entry = merged[key] = {
+                    "name": c.name,
+                    "version": c.version or hints.get(key, ""),
+                    "license": c.license,
+                    "selfBuilt": key in hints,
+                    "apkPackage": None if c.origin == "self-built" else c.origin,
+                    "url": c.url,
+                    "files": [],
+                    "wheels": [],
+                }
+            for f in c.files or [c.lib]:
+                if f not in entry["files"]:
+                    entry["files"].append(f)
+            if wheel_name not in entry["wheels"]:
+                entry["wheels"].append(wheel_name)
+
+    doc = {
+        "generatedAt": utc_now(),
+        "os": {"id": os_id, "version": os_version},
+        "wheels": wheels,
+        "components": [merged[k] for k in sorted(merged)],
+    }
+    (root / COMPONENTS_JSON).write_text(
+        json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def write_fossa_deps(root: Path, per_wheel: dict[str, list[Component]]) -> tuple[int, int]:
     """生成 ``fossa-deps.yml``，让 ``fossa analyze`` 在非 Enterprise 订阅下也能识别这些库。
 
@@ -589,7 +683,7 @@ def write_fossa_deps(root: Path, per_wheel: dict[str, list[Component]]) -> tuple
     """
     os_id, os_version = load_os_release()
     can_ref = bool(os_id and os_version)
-    hints = load_version_hints()
+    hints = load_version_hints(root)
     apk = load_apk_index() if can_ref else {}
 
     refs: set[tuple[str, str, str]] = set()
@@ -738,9 +832,11 @@ def run(root: Path, deny: list[str] | None = None, license_dir: Path | None = No
 
     unknown_check(per_wheel, allow_unknown)
 
-    write_notice(root, per_wheel)
+    hints = load_version_hints(root)
+    write_notice(root, per_wheel, hints)
     write_source_offer(root, per_wheel)
     write_sbom(root, per_wheel)
+    write_components_manifest(root, per_wheel, hints)
     n_ref, n_custom = write_fossa_deps(root, per_wheel)
     lic_dir = license_dir or license_dir_default()
     need = needed_texts(per_wheel)
@@ -752,7 +848,7 @@ def run(root: Path, deny: list[str] | None = None, license_dir: Path | None = No
             "（随附许可证全文是义务的一部分，缺一份就等于没履行）"
         )
 
-    parts = ["NOTICE.md", "SOURCE-OFFER.md"]
+    parts = ["NOTICE.md", "SOURCE-OFFER.md", COMPONENTS_JSON]
     if copied:
         parts.append(f"licenses/{', '.join(copied)}")
     else:

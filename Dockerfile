@@ -248,6 +248,12 @@ RUN set -eux; \
         --repair "$(ls /tmp/pillow-wheel/pillow-*.whl)" --out-dir /wheels; \
     python3 /usr/local/bin/pack_wheel.py --ddddocr /src/ddddocr \
         --expect-version "${DDDDOCR_VERSION}" --out-dir /wheels; \
+# 自编库的版本落盘给 compliance.py 读（键名是 KNOWN 表里的组件名，不是 ARG 名）。
+# 写进这个文件的名字同时标记了「这是我们自己编的」——OpenCV 5.0.0 是与 apk 的
+# opencv 4.x 不同的构建，所以它在 FOSSA 上只能是 custom-dependency。
+RUN set -eux; \
+    mkdir -p /wheels; \
+    printf '%s\n' "OpenCV=${OPENCV_VERSION}" > /wheels/component-versions; \
     python3 /usr/local/bin/pack_wheel.py --emit-index --compliance --out-dir /wheels; \
     cd /wheels; \
     ls -l; \
