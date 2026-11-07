@@ -484,20 +484,15 @@ jobs:
     timeout-minutes: 30
     # 闸门（fail-closed）：① 有发布意图 ② build 与 smoke 都成功（任何一个失败/取消
     # 都不发布，也不做「部分成功就先发一半」）③ 平台集合完整（见下一步）
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.smoke.result == 'success' }}
+    # 平台子集直接跳过本 job（显示 skipped），不再把整次 run 判成 failure——
+    # 子集构建的用途就是验证，跳过比报错准确。闸门本身仍然 fail-closed。
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.smoke.result == 'success' && needs.plan.outputs.full == 'true' }}
     permissions:
       contents: write      # 上传 Release 资产
       packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Guard - reject partial publish
-        if: ${{ needs.plan.outputs.full != 'true' }}
-        run: |
-          echo "::error::平台子集（${{ needs.plan.outputs.expected }}）不是完整平台集合，禁止发布。"
-          echo "::error::用子集发布会把两套多平台 manifest 都覆盖成不完整版本。"
-          echo "::error::要发布请留空 platforms 走全平台构建。"
-          exit 1
       - name: Download wheelhouse digests
         uses: actions/download-artifact@v4
         with:
