@@ -842,9 +842,21 @@ def run(root: Path, deny: list[str] | None = None, license_dir: Path | None = No
     lic_dir = license_dir or license_dir_default()
     need = needed_texts(per_wheel)
     copied = copy_licenses(root, lic_dir, need)
-    # 没有 copyleft 组件时也留一个空的 licenses/：让产物结构在主线与 ja3 线之间一致，
+    # 没有 copyleft 组件时也留一个非空的 licenses/：让产物结构在主线与 ja3 线之间一致，
     # 下游（qd 的 COPY --from）不用为「这个仓这次有没有 copyleft」写分支。
-    (root / "licenses").mkdir(exist_ok=True)
+    # 必须是**非空**目录——CI 用 --output type=local 导出、再回灌 scratch 镜像时，
+    # 空目录会在 tar/zip 往返里丢失，下游 COPY --from 就找不到源。
+    license_docs = root / "licenses"
+    license_docs.mkdir(exist_ok=True)
+    if not copied:
+        (license_docs / "README.md").write_text(
+            "# 本产物没有需要随附许可证全文的组件\n\n"
+            "随包的原生库均为宽松许可，或 GPL WITH GCC-exception-3.1\n"
+            "（该例外条款不产生源码提供义务），因此这里没有许可证全文。\n\n"
+            "保留本文件而不是留空目录：CI 导出产物再回灌 `FROM scratch` 镜像时，\n"
+            "空目录会在 tar/zip 往返中丢失，下游的 `COPY --from` 需要源确实存在。\n",
+            encoding="utf-8",
+        )
     missing = [n for n in need if n not in copied]
     if missing:
         raise SystemExit(
@@ -856,7 +868,7 @@ def run(root: Path, deny: list[str] | None = None, license_dir: Path | None = No
     if copied:
         parts.append(f"licenses/{', '.join(copied)}")
     else:
-        parts.append("licenses/（空：本仓无 copyleft 组件）")
+        parts.append("licenses/README.md（本产物无 copyleft 组件）")
     parts.append("sbom/*.cdx.json")
     if n_ref or n_custom:
         parts.append(f"{FOSSA_DEPS}（apk 引用 {n_ref} / 自编 {n_custom}）")
